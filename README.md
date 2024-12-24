@@ -4,7 +4,7 @@
 
 1. 访问 [www.cursor.com](https://www.cursor.com) 并完成注册登录（赠送 250 次快速响应，可通过删除账号再注册重置）
 2. 在浏览器中打开开发者工具（F12）
-3. 找到 应用-Cookies 中名为 `WorkosCursorSessionToken` 的值并保存(相当于 openai 的密钥)
+3. 找到 Application-Cookies 中名为 `WorkosCursorSessionToken` 的值并保存(相当于 openai 的密钥)
 
 ## 接口说明
 
@@ -12,40 +12,52 @@
 
 - 接口地址：`/v1/chat/completions`
 - 请求方法：POST
-- 认证方式：Bearer Token（支持两种认证方式）
+- 认证方式：Bearer Token
   1. 使用环境变量 `AUTH_TOKEN` 进行认证
   2. 使用 `.token` 文件中的令牌列表进行轮询认证
 
-### 获取模型列表
+### Token管理接口
 
+#### 简易Token信息管理页面
+- 接口地址：`/tokeninfo`
+- 请求方法：GET
+- 响应格式：HTML页面
+- 功能：获取 .token 和 .token-list 文件内容，并允许用户方便地使用 API 修改文件内容
+
+#### 更新Token信息
+- 接口地址：`/update-tokeninfo`
+- 请求方法：GET
+- 认证方式：不需要
+- 功能：请求内容不包括文件内容，直接修改文件，调用重载函数
+
+#### 更新Token信息
+- 接口地址：`/update-tokeninfo`
+- 请求方法：POST
+- 认证方式：Bearer Token
+- 功能：请求内容包括文件内容，间接修改文件，调用重载函数
+
+#### 获取Token信息
+- 接口地址：`/get-tokeninfo`
+- 请求方法：POST
+- 认证方式：Bearer Token
+
+### 其他接口
+
+#### 获取模型列表
 - 接口地址：`/v1/models`
 - 请求方法：GET
 
-### 获取环境变量中的x-cursor-checksum
-
-- 接口地址：`/env-checksum`
-- 请求方法：GET
-
-### 获取随机x-cursor-checksum
-
+#### 获取随机x-cursor-checksum
 - 接口地址：`/checksum`
 - 请求方法：GET
 
-### 健康检查接口
-
+#### 健康检查接口
 - 接口地址：`/`
 - 请求方法：GET
 
-### 获取日志接口
-
+#### 获取日志接口
 - 接口地址：`/logs`
 - 请求方法：GET
-
-### Token管理接口
-
-- 获取Token信息页面：`/tokeninfo`
-- 更新Token信息：`/update-tokeninfo`
-- 获取Token信息：`/get-tokeninfo`
 
 ## 配置说明
 
@@ -60,16 +72,52 @@
 ### Token文件格式
 
 1. `.token` 文件：每行一个token，支持以下格式：
+
    ```
    token1
    alias::token2
    ```
 
+   alias 可以是任意值，用于区分不同的 token，更方便管理，WorkosCursorSessionToken 是相同格式
+   该文件将自动向.token-list文件中追加token，同时自动生成checksum
+
 2. `.token-list` 文件：每行为token和checksum的对应关系：
+
    ```
    token1,checksum1
    token2,checksum2
    ```
+
+   该文件可以被自动管理，但用户仅可在确认自己拥有修改能力时修改，一般仅有以下情况需要手动修改：
+
+   - 需要删除某个 token
+   - 需要使用已有 checksum 来对应某一个 token
+
+### 模型列表
+
+写死了，后续也不会会支持自定义模型列表
+```
+cursor-small
+claude-3-opus
+cursor-fast
+gpt-3.5-turbo
+gpt-4-turbo-2024-04-09
+gpt-4
+gpt-4o-128k
+gemini-1.5-flash-500k
+claude-3-haiku-200k
+claude-3-5-sonnet-200k
+claude-3-5-sonnet-20240620
+claude-3-5-sonnet-20241022
+gpt-4o-mini
+o1-mini
+o1-preview
+o1
+claude-3.5-haiku
+gemini-exp-1206
+gemini-2.0-flash-thinking-exp
+gemini-2.0-flash-exp
+```
 
 ## 部署
 
@@ -77,15 +125,20 @@
 
 #### 从源码编译
 
-需要安装 Rust 工具链和 protobuf 编译器：
+需要安装 Rust 工具链和依赖：
 
 ```bash
-# 安装依赖（Debian/Ubuntu）
-apt-get install -y build-essential protobuf-compiler
+# 安装rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 编译并运行
+# 安装依赖（Debian/Ubuntu）
+apt-get install -y build-essential protobuf-compiler pkg-config libssl-dev nodejs npm
+
+# 原生编译
 cargo build --release
-./target/release/cursor-api
+
+# 交叉编译，以x86_64-unknown-linux-gnu为例，老实说，这也算原生编译，因为使用了docker
+cross build --target x86_64-unknown-linux-gnu --release
 ```
 
 #### 使用预编译二进制
@@ -109,28 +162,48 @@ docker run -p 3000:3000 cursor-api
 
 ### huggingface部署
 
-1. duplicate项目:
-   [huggingface链接](https://huggingface.co/login?next=%2Fspaces%2Fstevenrk%2Fcursor%3Fduplicate%3Dtrue)
+前提：一个huggingface账号
+
+1. 创建一个Space并创建一个Dockerfile文件，内容如下：
+
+   ```Dockerfile
+   FROM wisdgod/cursor-api:latest
+
+   # 可能你要覆盖原镜像的环境变量，但都可以在下面的第2步中配置
+   ENV PORT=7860
+   ```
 
 2. 配置环境变量
 
-   在你的space中，点击settings，找到`Variables and secrets`，添加Variables
-   - name: `AUTH_TOKEN` （注意大写）
-   - value: 你随意
+   在你的 Space 中，点击 Settings，找到 `Variables and secrets`，添加 Variables
+
+   ```env
+   # 可选，用于配置服务器端口
+   PORT=3000
+   # 必选，用于配置路由前缀，比如/api,/hf,/proxy等等
+   ROUTE_PREFIX=
+   # 必选，用于API认证
+   AUTH_TOKEN=
+   # 可选，用于配置token文件路径
+   TOKEN_FILE=.token
+   # 可选，用于配置token列表文件路径
+   TOKEN_LIST_FILE=.token-list
+   ```
 
 3. 重新部署
-   
+
    点击`Factory rebuild`，等待部署完成
 
 4. 接口地址（`Embed this Space`中查看）：
+
    ```
    https://{username}-{space-name}.hf.space/v1/models
    ```
 
 ## 注意事项
 
-1. 请妥善保管您的 AuthToken，不要泄露给他人
-2. 配置 AUTH_TOKEN 环境变量以增加安全性
+1. 请妥善保管您的任何 Token，不要泄露给他人。若发现泄露，请及时更改
+2. 请遵守本项目许可证，你仅拥有使用本项目的权利，不得用于商业用途
 3. 本项目仅供学习研究使用，请遵守 Cursor 的使用条款
 
 ## 开发
@@ -147,12 +220,13 @@ docker run -p 3000:3000 cursor-api
 ./scripts/build.sh --cross
 ```
 
-支持的目标平台：
-- x86_64-unknown-linux-gnu
-- x86_64-pc-windows-msvc
-- aarch64-unknown-linux-gnu
-- x86_64-apple-darwin
-- aarch64-apple-darwin
+支持的平台：
+
+- linux x86_64
+- windows x86_64
+- macos x86_64
+- freebsd x86_64
+- docker (only for linux x86_64)
 
 ### 获取token
 

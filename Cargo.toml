@@ -1,6 +1,6 @@
 [package]
 name = "cursor-api"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["wisdgod <nav@wisdgod.com>"]
 
@@ -28,13 +28,12 @@ tokio-stream = { version = "0.1.17", features = ["time"] }
 tower-http = { version = "0.6.2", features = ["cors"] }
 uuid = { version = "1.11.0", features = ["v4"] }
 
-# 优化设置
 [profile.release]
-lto = true           # 启用链接时优化
-codegen-units = 1    # 减少并行编译单元以提高优化
-panic = 'abort'      # 在 panic 时直接终止，减小二进制大小
-strip = true         # 移除调试符号
-opt-level = 3        # 最高优化级别
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
+opt-level = 3
 
 # 构建脚本设置
 [package.metadata.cross.target.x86_64-unknown-linux-gnu]

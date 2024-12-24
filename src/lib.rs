@@ -140,16 +140,14 @@ pub async fn encode_chat_message(
     Ok(hex::decode(len_prefix + &content)?)
 }
 
-pub async fn decode_response(data: &[u8]) -> String {
-    if let Ok(decoded) = decode_proto_messages(data) {
-        if !decoded.is_empty() {
-            return decoded;
-        }
+pub async fn decode_response(data: &[u8]) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    match decode_proto_messages(data) {
+        Ok(decoded) if !decoded.is_empty() => Ok(decoded),
+        _ => decompress_response(data).await
     }
-    decompress_response(data).await
 }
 
-fn decode_proto_messages(data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+fn decode_proto_messages(data: &[u8]) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let hex_str = hex::encode(data);
     let mut pos = 0;
     let mut messages = Vec::new();
@@ -173,9 +171,9 @@ fn decode_proto_messages(data: &[u8]) -> Result<String, Box<dyn std::error::Erro
     Ok(messages.join(""))
 }
 
-async fn decompress_response(data: &[u8]) -> String {
+async fn decompress_response(data: &[u8]) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if data.len() <= 5 {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut decoder = GzDecoder::new(&data[5..]);
@@ -184,12 +182,12 @@ async fn decompress_response(data: &[u8]) -> String {
     match decoder.read_to_string(&mut text) {
         Ok(_) => {
             if !text.contains("<|BEGIN_SYSTEM|>") {
-                text
+                Ok(text)
             } else {
-                String::new()
+                Ok(String::new())
             }
-        }
-        Err(_) => String::new(),
+        },
+        Err(e) => Err(Box::new(e))
     }
 }
 
