@@ -46,73 +46,11 @@ jobs:
           libssl-dev \
           openssl
 
-        # 安装 npm 依赖
-        cd scripts && npm install && cd ..
-
         # 设置 OpenSSL 环境变量
         echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
         echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
         echo "OPENSSL_INCLUDE_DIR=/usr/include/openssl" >> $GITHUB_ENV
         echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-
-    # - name: Set up Docker Buildx
-      # if: runner.os == 'Linux'
-      # uses: docker/setup-buildx-action@v3.8.0
-
-    # - name: Build Linux arm64
-    #   if: runner.os == 'Linux'
-    #   run: |
-    #     # 启用 QEMU 支持
-    #     docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-
-    #     # 创建 Dockerfile
-    #     cat > Dockerfile.arm64 << 'EOF'
-    #     FROM arm64v8/ubuntu:22.04
-
-    #     ENV DEBIAN_FRONTEND=noninteractive
-
-    #     RUN apt-get update && apt-get install -y \
-    #         build-essential \
-    #         curl \
-    #         pkg-config \
-    #         libssl-dev \
-    #         protobuf-compiler \
-    #         nodejs \
-    #         npm \
-    #         git \
-    #         && rm -rf /var/lib/apt/lists/*
-
-    #     # 安装 Rust
-    #     RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    #     ENV PATH="/root/.cargo/bin:${PATH}"
-
-    #     WORKDIR /build
-    #     COPY . .
-
-    #     # 安装 npm 依赖
-    #     RUN cd scripts && npm install && cd ..
-
-    #     # 构建动态链接版本
-    #     RUN cargo build --release
-
-    #     # 构建静态链接版本
-    #     RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
-    #     EOF
-
-    #     # 构建 arm64 版本
-    #     docker buildx build --platform linux/arm64 -f Dockerfile.arm64 -t builder-arm64 .
-
-    #     # 创建临时容器
-    #     docker create --name temp-container builder-arm64 sh
-
-    #     # 复制动态链接版本
-    #     docker cp temp-container:/build/target/release/cursor-api ./release/cursor-api-aarch64-unknown-linux-gnu
-
-    #     # 复制静态链接版本
-    #     docker cp temp-container:/build/target/release/cursor-api ./release/cursor-api-static-aarch64-unknown-linux-gnu
-
-    #     # 清理临时容器
-    #     docker rm temp-container
 
     - name: Build Linux x86_64 (Dynamic)
       if: runner.os == 'Linux'
@@ -137,17 +75,38 @@ jobs:
       run: |
         choco install -y protoc
         choco install -y openssl
-        echo "OPENSSL_DIR=C:/Program Files/OpenSSL-Win64" >> $GITHUB_ENV
-        echo "PKG_CONFIG_PATH=C:/Program Files/OpenSSL-Win64/lib/pkgconfig" >> $GITHUB_ENV
-        cd scripts && npm install && cd ..
+
+        # 刷新环境变量
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+        # 设置 OpenSSL 环境变量
+        echo "OPENSSL_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
+        echo "PKG_CONFIG_PATH=C:\Program Files\OpenSSL\lib\pkgconfig" >> $env:GITHUB_ENV
 
     - name: Build (Dynamic)
-      if: runner.os != 'Linux' && runner.os != 'FreeBSD'
-      run: bash scripts/build.sh
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./scripts/build.ps1
 
     - name: Build (Static)
-      if: runner.os != 'Linux' && runner.os != 'FreeBSD'
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./scripts/build.ps1 -Static
+
+    - name: Build macOS (Dynamic)
+      if: runner.os == 'macOS'
+      run: bash scripts/build.sh
+
+    - name: Build macOS (Static)
+      if: runner.os == 'macOS'
       run: bash scripts/build.sh --static
+
+    # - name: Verify build artifacts
+    #   run: |
+    #     if [ ! -d "release" ] || [ -z "$(ls -A release)" ]; then
+    #       echo "Error: No build artifacts found in release directory"
+    #       exit 1
+    #     fi
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4.5.0
@@ -191,9 +150,6 @@ jobs:
           # 克隆代码（确保在正确的目录）
           cd /root
           git clone $GITHUB_SERVER_URL/$GITHUB_REPOSITORY .
-
-          # 然后再进入 scripts 目录
-          cd scripts && npm install && cd ..
 
           # 安装 rustup 和 Rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable

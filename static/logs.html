@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>请求日志查看</title>
+  <!-- 引入共享样式 -->
+  <link rel="stylesheet" href="/static/shared-styles.css">
+  <script src="/static/shared.js"></script>
+  <style>
+    /* 日志页面特定样式 */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: var(--spacing);
+    }
+
+    .stat-card {
+      background: var(--card-background);
+      padding: 15px;
+      border-radius: var(--border-radius);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    .stat-card h4 {
+      margin: 0 0 8px 0;
+      color: var(--primary-color);
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: 500;
+    }
+
+    .refresh-container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .auto-refresh {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>请求日志查看</h1>
+
+  <div class="container">
+    <div class="form-group">
+      <label>认证令牌:</label>
+      <input type="password" id="authToken" placeholder="输入 AUTH_TOKEN">
+    </div>
+    <div class="refresh-container">
+      <div class="button-group">
+        <button onclick="fetchLogs()">刷新日志</button>
+      </div>
+      <div class="auto-refresh">
+        <input type="checkbox" id="autoRefresh" checked>
+        <label for="autoRefresh">自动刷新 (60秒)</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <h4>总请求数</h4>
+        <div id="totalRequests" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <h4>活跃请求数</h4>
+        <div id="activeRequests" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <h4>最后更新</h4>
+        <div id="lastUpdate" class="stat-value">-</div>
+      </div>
+    </div>
+
+    <div class="table-container">
+      <table id="logsTable">
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>模型</th>
+            <th>校验和</th>
+            <th>认证令牌</th>
+            <th>别名</th>
+            <th>流式响应</th>
+            <th>状态</th>
+            <th>错误信息</th>
+          </tr>
+        </thead>
+        <tbody id="logsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="message"></div>
+
+  <script>
+    let refreshInterval;
+
+    function showMessage(text, isError = false) {
+      showGlobalMessage(text, isError);
+    }
+
+    function updateStats(data) {
+      document.getElementById('totalRequests').textContent = data.total;
+      document.getElementById('activeRequests').textContent = data.active || 0;
+      document.getElementById('lastUpdate').textContent =
+        new Date(data.timestamp).toLocaleTimeString();
+    }
+
+    function updateTable(data) {
+      const tbody = document.getElementById('logsBody');
+      updateStats(data);
+
+      tbody.innerHTML = data.logs.map(log => `
+        <tr>
+          <td>${new Date(log.timestamp).toLocaleString()}</td>
+          <td>${log.model}</td>
+          <td>${log.checksum}</td>
+          <td>${log.auth_token}</td>
+          <td>${log.alias || '-'}</td>
+          <td>${log.stream ? '是' : '否'}</td>
+          <td>${log.status}</td>
+          <td>${log.error || '-'}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function fetchLogs() {
+      const data = await makeAuthenticatedRequest('/logs');
+      if (data) {
+        updateTable(data);
+        showGlobalMessage('日志获取成功');
+      }
+    }
+
+    // 自动刷新控制
+    document.getElementById('autoRefresh').addEventListener('change', function (e) {
+      if (e.target.checked) {
+        refreshInterval = setInterval(fetchLogs, 60000);
+      } else {
+        clearInterval(refreshInterval);
+      }
+    });
+
+    // 页面加载完成后自动获取日志
+    document.addEventListener('DOMContentLoaded', () => {
+      const authToken = getAuthToken();
+      if (authToken) {
+        document.getElementById('authToken').value = authToken;
+        fetchLogs();
+      }
+      // 启动自动刷新
+      refreshInterval = setInterval(fetchLogs, 60000);
+    });
+
+    // 初始化 token 处理
+    initializeTokenHandling('authToken');
+
+    // 添加清理逻辑
+    window.addEventListener('beforeunload', () => {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
+    });
+  </script>
+</body>
+
+</html>

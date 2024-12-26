@@ -2,7 +2,10 @@
 /get-token/target
 /*.log
 /*.env
-/static/tokeninfo.min.html
+/static/*.min.html
+/static/*.min.css
+/static/*.min.js
+/scripts/.asset-hashes.json
 node_modules
 .DS_Store
 /.vscode

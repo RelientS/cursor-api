@@ -97,17 +97,18 @@
 
 写死了，后续也不会会支持自定义模型列表
 ```
-cursor-small
+claude-3.5-sonnet
+gpt-4
+gpt-4o
 claude-3-opus
 cursor-fast
+cursor-small
 gpt-3.5-turbo
 gpt-4-turbo-2024-04-09
-gpt-4
 gpt-4o-128k
 gemini-1.5-flash-500k
 claude-3-haiku-200k
 claude-3-5-sonnet-200k
-claude-3-5-sonnet-20240620
 claude-3-5-sonnet-20241022
 gpt-4o-mini
 o1-mini
@@ -137,7 +138,7 @@ apt-get install -y build-essential protobuf-compiler pkg-config libssl-dev nodej
 # 原生编译
 cargo build --release
 
-# 交叉编译，以x86_64-unknown-linux-gnu为例，老实说，这也算原生编译，因为使用了docker
+# 交叉编译，以x86_64-unknown-linux-gnu为例
 cross build --target x86_64-unknown-linux-gnu --release
 ```
 
@@ -210,15 +211,7 @@ docker run -p 3000:3000 cursor-api
 
 ### 跨平台编译
 
-使用提供的构建脚本：
-
-```bash
-# 仅编译当前平台
-./scripts/build.sh
-
-# 交叉编译所有支持的平台
-./scripts/build.sh --cross
-```
+自行配置cross编译环境
 
 支持的平台：
 

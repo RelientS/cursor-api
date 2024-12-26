@@ -1,0 +1,169 @@
+:root {
+  --primary-color: #2196F3;
+  --primary-dark: #1976D2;
+  --success-color: #4CAF50;
+  --error-color: #F44336;
+  --background-color: #F5F5F5;
+  --card-background: #FFFFFF;
+  --border-radius: 8px;
+  --spacing: 20px;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--spacing);
+  background: var(--background-color);
+  color: #333;
+  line-height: 1.6;
+}
+
+.container {
+  background: var(--card-background);
+  padding: var(--spacing);
+  border-radius: var(--border-radius);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin-bottom: var(--spacing);
+}
+
+h1,
+h2,
+h3 {
+  color: #1a1a1a;
+  margin-top: 0;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+input[type="text"],
+input[type="password"],
+select,
+textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  transition: border-color 0.2s;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--primary-color);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.1);
+}
+
+textarea {
+  min-height: 150px;
+  font-family: monospace;
+  resize: vertical;
+}
+
+.button-group {
+  display: flex;
+  gap: 10px;
+  margin: var(--spacing) 0;
+}
+
+button {
+  background: var(--primary-color);
+  color: white;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.2s, transform 0.1s;
+}
+
+button:hover {
+  background: var(--primary-dark);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button.secondary {
+  background: #757575;
+}
+
+button.secondary:hover {
+  background: #616161;
+}
+
+.message {
+  padding: 12px;
+  border-radius: var(--border-radius);
+  margin: 10px 0;
+}
+
+.success {
+  background: #E8F5E9;
+  color: #2E7D32;
+  border: 1px solid #A5D6A7;
+}
+
+.error {
+  background: #FFEBEE;
+  color: #C62828;
+  border: 1px solid #FFCDD2;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--spacing);
+  background: var(--card-background);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+}
+
+th,
+td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+th {
+  background: var(--primary-color);
+  color: white;
+  font-weight: 500;
+}
+
+tr:nth-child(even) {
+  background: #f8f9fa;
+}
+
+tr:hover {
+  background: #f1f3f4;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  body {
+    padding: 10px;
+  }
+
+  .button-group {
+    flex-direction: column;
+  }
+
+  table {
+    display: block;
+    overflow-x: auto;
+  }
+}

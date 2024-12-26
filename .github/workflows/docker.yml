@@ -2,9 +2,9 @@ name: Docker Build and Push
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+  # push:
+  #   tags:
+  #     - 'v*'
 
 env:
   IMAGE_NAME: ${{ github.repository_owner }}/cursor-api

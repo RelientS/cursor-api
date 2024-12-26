@@ -1,158 +1,126 @@
-# ÑÕÉ«Êä³öº¯Êı
-function Write-Info { Write-Host "[INFO] $args" -ForegroundColor Blue }
-function Write-Warn { Write-Host "[WARN] $args" -ForegroundColor Yellow }
-function Write-Error { Write-Host "[ERROR] $args" -ForegroundColor Red; exit 1 }
+# å‚æ•°å¤„ç†
+param(
+    [switch]$Static,
+    [switch]$Help,
+    [ValidateSet("x86_64", "aarch64", "i686")]
+    [string]$Architecture
+)
 
-# ¼ì²é±ØÒªµÄ¹¤¾ß
-function Test-Requirements {
-  $tools = @("cargo", "protoc", "npm", "node")
-  $missing = @()
+# è®¾ç½®é”™è¯¯æ—¶åœæ­¢æ‰§è¡Œ
+$ErrorActionPreference = "Stop"
 
-  foreach ($tool in $tools) {
-    if (!(Get-Command $tool -ErrorAction SilentlyContinue)) {
-      $missing += $tool
-    }
-  }
+# é¢œè‰²è¾“å‡ºå‡½æ•°
+function Write-Info  { param($Message) Write-Host "[INFO] $Message" -ForegroundColor Blue }
+function Write-Warn  { param($Message) Write-Host "[WARN] $Message" -ForegroundColor Yellow }
+function Write-Error { param($Message) Write-Host "[ERROR] $Message" -ForegroundColor Red; exit 1 }
 
-  if ($missing.Count -gt 0) {
-    Write-Error "È±ÉÙ±ØÒª¹¤¾ß: $($missing -join ', ')"
-  }
-}
+# æ£€æŸ¥å¿…è¦çš„å·¥å…·
+function Check-Requirements {
+    $tools = @("cargo", "protoc", "npm", "node")
+    $missing = @()
 
-# ÔÚ Test-Requirements º¯ÊıºóÌí¼ÓĞÂº¯Êı
-function Initialize-VSEnvironment {
-    Write-Info "ÕıÔÚ³õÊ¼»¯ Visual Studio »·¾³..."
-
-    # Ö±½ÓÊ¹ÓÃÒÑÖªµÄ vcvarsall.bat Â·¾¶
-    $vcvarsallPath = "E:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
-
-    if (-not (Test-Path $vcvarsallPath)) {
-        Write-Error "Î´ÕÒµ½ vcvarsall.bat: $vcvarsallPath"
-        return
-    }
-
-    Write-Info "Ê¹ÓÃ vcvarsall.bat Â·¾¶: $vcvarsallPath"
-
-    # »ñÈ¡»·¾³±äÁ¿
-    $archArg = "x64"
-    $command = "`"$vcvarsallPath`" $archArg && set"
-
-    try {
-        $output = cmd /c "$command" 2>&1
-
-        # ¼ì²éÃüÁîÊÇ·ñ³É¹¦Ö´ĞĞ
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "vcvarsall.bat Ö´ĞĞÊ§°Ü£¬ÍË³öÂë: $LASTEXITCODE"
-            return
+    foreach ($tool in $tools) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            $missing += $tool
         }
-
-        # ¸üĞÂµ±Ç° PowerShell »á»°µÄ»·¾³±äÁ¿
-        foreach ($line in $output) {
-            if ($line -match "^([^=]+)=(.*)$") {
-                $name = $matches[1]
-                $value = $matches[2]
-                if (![string]::IsNullOrEmpty($name)) {
-                    Set-Item -Path "env:$name" -Value $value -ErrorAction SilentlyContinue
-                }
-            }
-        }
-
-        Write-Info "Visual Studio »·¾³³õÊ¼»¯Íê³É"
     }
-    catch {
-        Write-Error "³õÊ¼»¯ Visual Studio »·¾³Ê±·¢Éú´íÎó: $_"
+
+    if ($missing.Count -gt 0) {
+        Write-Error "ç¼ºå°‘å¿…è¦å·¥å…·: $($missing -join ', ')"
     }
 }
 
-# °ïÖúĞÅÏ¢
+# å¸®åŠ©ä¿¡æ¯
 function Show-Help {
-  Write-Host @"
-ÓÃ·¨: $(Split-Path $MyInvocation.MyCommand.Path -Leaf) [Ñ¡Ïî]
+    Write-Host @"
+ç”¨æ³•: $(Split-Path $MyInvocation.ScriptName -Leaf) [é€‰é¡¹]
 
-Ñ¡Ïî:
-  --static        Ê¹ÓÃ¾²Ì¬Á´½Ó£¨Ä¬ÈÏ¶¯Ì¬Á´½Ó£©
-  --help          ÏÔÊ¾´Ë°ïÖúĞÅÏ¢
+é€‰é¡¹:
+  -Static        ä½¿ç”¨é™æ€é“¾æ¥ï¼ˆé»˜è®¤åŠ¨æ€é“¾æ¥ï¼‰
+  -Help          æ˜¾ç¤ºæ­¤å¸®åŠ©ä¿¡æ¯
 
-Ä¬ÈÏ±àÒëËùÓĞ Windows Ö§³ÖµÄ¼Ü¹¹ (x64 ºÍ arm64)
+ä¸å¸¦å‚æ•°æ—¶ä½¿ç”¨é»˜è®¤é…ç½®æ„å»º
 "@
 }
 
-# ¹¹½¨º¯Êı
-function New-Target {
-  param (
-    [string]$target,
-    [string]$rustflags
-  )
+# æ„å»ºå‡½æ•°
+function Build-Target {
+    param (
+        [string]$Target,
+        [string]$RustFlags
+    )
 
-  Write-Info "ÕıÔÚ¹¹½¨ $target..."
+    Write-Info "æ­£åœ¨æ„å»º $Target..."
 
-  # ÉèÖÃ»·¾³±äÁ¿²¢Ö´ĞĞ¹¹½¨
-  $env:RUSTFLAGS = $rustflags
-  cargo build --target $target --release
+    # è®¾ç½®ç¯å¢ƒå˜é‡
+    $env:RUSTFLAGS = $RustFlags
 
-  # ÒÆ¶¯¹¹½¨²úÎï
-  $binaryName = "cursor-api"
-  if ($UseStatic) {
-    $binaryName += "-static"
-  }
+    # æ„å»º
+    if ($Target -ne (rustc -Vv | Select-String "host: (.*)" | ForEach-Object { $_.Matches.Groups[1].Value })) {
+        cargo build --target $Target --release
+    } else {
+        cargo build --release
+    }
 
-  $sourcePath = "target/$target/release/cursor-api.exe"
-  $targetPath = "release/${binaryName}-${target}.exe"
+    # ç§»åŠ¨ç¼–è¯‘äº§ç‰©åˆ° release ç›®å½•
+    $binaryName = "cursor-api"
+    if ($Static) {
+        $binaryName += "-static"
+    }
 
-  if (Test-Path $sourcePath) {
-    Copy-Item $sourcePath $targetPath -Force
-    Write-Info "Íê³É¹¹½¨ $target"
-  }
-  else {
-    Write-Warn "¹¹½¨²úÎïÎ´ÕÒµ½: $target"
-    return $false
-  }
-  return $true
+    $binaryPath = if ($Target -eq (rustc -Vv | Select-String "host: (.*)" | ForEach-Object { $_.Matches.Groups[1].Value })) {
+        "target/release/cursor-api.exe"
+    } else {
+        "target/$Target/release/cursor-api.exe"
+    }
+
+    if (Test-Path $binaryPath) {
+        Copy-Item $binaryPath "release/$binaryName-$Target.exe"
+        Write-Info "å®Œæˆæ„å»º $Target"
+    } else {
+        Write-Warn "æ„å»ºäº§ç‰©æœªæ‰¾åˆ°: $Target"
+        Write-Warn "æŸ¥æ‰¾è·¯å¾„: $binaryPath"
+        Write-Warn "å½“å‰ç›®å½•å†…å®¹:"
+        Get-ChildItem -Recurse target/
+        return $false
+    }
+
+    return $true
 }
 
-# ²ÎÊı½âÎö
-$UseStatic = $false
-
-foreach ($arg in $args) {
-  switch ($arg) {
-    "--static" { $UseStatic = $true }
-    "--help" { Show-Help; exit 0 }
-    default { Write-Error "Î´Öª²ÎÊı: $arg" }
-  }
+if ($Help) {
+    Show-Help
+    exit 0
 }
 
-# Ö÷³ÌĞò
-try {
-  # ¼ì²éÒÀÀµ
-  Test-Requirements
+# æ£€æŸ¥ä¾èµ–
+Check-Requirements
 
-  # ³õÊ¼»¯ Visual Studio »·¾³
-  Initialize-VSEnvironment
+# åˆ›å»º release ç›®å½•
+New-Item -ItemType Directory -Force -Path release | Out-Null
 
-  # ´´½¨ release Ä¿Â¼
-  New-Item -ItemType Directory -Force -Path "release" | Out-Null
-
-  # ÉèÖÃÄ¿±êÆ½Ì¨
-  $targets = @(
-    "x86_64-pc-windows-msvc",
-    "aarch64-pc-windows-msvc"
-  )
-
-  # ÉèÖÃ¾²Ì¬Á´½Ó±êÖ¾
-  $rustflags = ""
-  if ($UseStatic) {
-    $rustflags = "-C target-feature=+crt-static"
-  }
-
-  Write-Info "¿ªÊ¼¹¹½¨..."
-
-  # ¹¹½¨ËùÓĞÄ¿±ê
-  foreach ($target in $targets) {
-    New-Target -target $target -rustflags $rustflags
-  }
-
-  Write-Info "¹¹½¨Íê³É£¡"
+# è®¾ç½®é™æ€é“¾æ¥æ ‡å¿—
+$rustFlags = ""
+if ($Static) {
+    $rustFlags = "-C target-feature=+crt-static"
 }
-catch {
-  Write-Error "¹¹½¨¹ı³ÌÖĞ·¢Éú´íÎó: $_"
+
+# è·å–ç›®æ ‡æ¶æ„
+$arch = if ($Architecture) {
+    $Architecture
+} else {
+    switch ($env:PROCESSOR_ARCHITECTURE) {
+        "AMD64" { "x86_64" }
+        "ARM64" { "aarch64" }
+        "X86" { "i686" }
+        default { Write-Error "ä¸æ”¯æŒçš„æ¶æ„: $env:PROCESSOR_ARCHITECTURE" }
+    }
 }
+$target = "$arch-pc-windows-msvc"
+
+Write-Info "å¼€å§‹æ„å»º..."
+if (-not (Build-Target -Target $target -RustFlags $rustFlags)) {
+    Write-Error "æ„å»ºå¤±è´¥"
+}
+
+Write-Info "æ„å»ºå®Œæˆï¼"

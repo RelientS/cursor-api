@@ -6,11 +6,6 @@ info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 error() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
-# 检查是否在 Linux 环境
-is_linux() {
-    [ "$(uname -s)" = "Linux" ]
-}
-
 # 检查必要的工具
 check_requirements() {
     local missing_tools=()
@@ -21,11 +16,6 @@ check_requirements() {
             missing_tools+=("$tool")
         fi
     done
-
-    # cross 工具检查（仅在 Linux 上需要）
-    if [[ "$OS" == "Linux" ]] && ! command -v cross &>/dev/null; then
-        missing_tools+=("cross")
-    fi
 
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
         error "缺少必要工具: ${missing_tools[*]}"
@@ -38,28 +28,11 @@ show_help() {
 用法: $(basename "$0") [选项]
 
 选项:
-  --cross         使用 cross 进行交叉编译（仅在 Linux 上有效）
   --static        使用静态链接（默认动态链接）
   --help          显示此帮助信息
 
 不带参数时只编译当前平台
 EOF
-}
-
-# 判断是否使用 cross
-should_use_cross() {
-    local target=$1
-    # 如果不是 Linux 环境，直接返回 false
-    if [[ "$OS" != "Linux" ]]; then
-        return 1
-    fi
-    
-    # 在 Linux 环境下，以下目标不使用 cross：
-    # 1. Linux 上的 x86_64-unknown-linux-gnu
-    if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
-        return 1
-    fi
-    return 0
 }
 
 # 并行构建函数
@@ -73,15 +46,11 @@ build_target() {
     # 确定文件后缀
     [[ $target == *"windows"* ]] && extension=".exe"
 
-    # 判断是否使用 cross
-    if should_use_cross "$target"; then
-        env RUSTFLAGS="$rustflags" cross build --target "$target" --release
+    # 构建
+    if [[ $target != "$CURRENT_TARGET" ]]; then
+        env RUSTFLAGS="$rustflags" cargo build --target "$target" --release
     else
-        if [[ $target != "$CURRENT_TARGET" ]]; then
-            env RUSTFLAGS="$rustflags" cargo build --target "$target" --release
-        else
-            env RUSTFLAGS="$rustflags" cargo build --release
-        fi
+        env RUSTFLAGS="$rustflags" cargo build --release
     fi
 
     # 移动编译产物到 release 目录
@@ -118,7 +87,7 @@ get_target() {
     case "$os" in
         "Darwin") echo "${arch}-apple-darwin" ;;
         "Linux") echo "${arch}-unknown-linux-gnu" ;;
-        "MINGW"*|"MSYS"*|"CYGWIN"*|"Windows_NT") echo "${arch}-pc-windows-msvc" ;;
+        "MINGW"*|"MSYS"*|"CYGWIN"*|"Windows_NT") echo "${arch}-pc-windows-gnu" ;;
         "FreeBSD") echo "${arch}-unknown-freebsd" ;;
         *) error "不支持的系统: $os" ;;
     esac
@@ -134,16 +103,16 @@ CURRENT_TARGET=$(get_target "$ARCH" "$OS")
 get_targets() {
     case "$1" in
         "linux")
-            # Linux 构建所有 Linux 目标和 FreeBSD 目标
-            echo "x86_64-unknown-linux-gnu x86_64-unknown-freebsd"
+            # Linux 只构建当前架构
+            echo "$CURRENT_TARGET"
             ;;
         "freebsd")
-            # FreeBSD 只构建当前架构的 FreeBSD 目标
-            echo "${ARCH}-unknown-freebsd"
+            # FreeBSD 只构建当前架构
+            echo "$CURRENT_TARGET"
             ;;
         "windows")
-            # Windows 构建所有 Windows 目标
-            echo "x86_64-pc-windows-msvc"
+            # Windows 只构建当前架构
+            echo "$CURRENT_TARGET"
             ;;
         "macos")
             # macOS 构建所有 macOS 目标
@@ -170,16 +139,16 @@ check_requirements
 
 # 确定要构建的目标
 case "$OS" in
-    "Darwin") 
+    Darwin) 
         TARGETS=($(get_targets "macos"))
         ;;
-    "Linux")
+    Linux)
         TARGETS=($(get_targets "linux"))
         ;;
-    "FreeBSD")
+    FreeBSD)
         TARGETS=($(get_targets "freebsd"))
         ;;
-    "MINGW"*|"MSYS"*|"CYGWIN"*|"Windows_NT")
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
         TARGETS=($(get_targets "windows"))
         ;;
     *) error "不支持的系统: $OS" ;;
