@@ -2,7 +2,6 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::pin::Pin;
-
 #[cfg(feature = "stream")]
 use std::io;
 #[cfg(feature = "stream")]
@@ -13,9 +12,8 @@ use mime_guess::Mime;
 use percent_encoding::{self, AsciiSet, NON_ALPHANUMERIC};
 #[cfg(feature = "stream")]
 use tokio::fs::File;
-
 use futures_core::Stream;
-use futures_util::{future, stream, StreamExt};
+use futures_util::{StreamExt, future, stream};
 
 use super::Body;
 use crate::header::HeaderMap;
@@ -53,24 +51,16 @@ pub(crate) trait PartProps {
 // ===== impl Form =====
 
 impl Default for Form {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Form {
     /// Creates a new async Form without any content.
-    pub fn new() -> Form {
-        Form {
-            inner: FormParts::new(),
-        }
-    }
+    pub fn new() -> Form { Form { inner: FormParts::new() } }
 
     /// Get the boundary that this form will use.
     #[inline]
-    pub fn boundary(&self) -> &str {
-        self.inner.boundary()
-    }
+    pub fn boundary(&self) -> &str { self.inner.boundary() }
 
     /// Add a data field with supplied name and value.
     ///
@@ -118,9 +108,7 @@ impl Form {
 
     /// Adds a customized Part.
     pub fn part<T>(self, name: T, part: Part) -> Form
-    where
-        T: Into<Cow<'static, str>>,
-    {
+    where T: Into<Cow<'static, str>> {
         self.with_inner(move |inner| inner.part(name, part))
     }
 
@@ -170,9 +158,7 @@ impl Form {
                 as Pin<Box<dyn Stream<Item = crate::Result<Bytes>> + Send + Sync>>
         });
         // append special ending boundary
-        let last = stream::once(future::ready(Ok(
-            format!("--{}--\r\n", self.boundary()).into()
-        )));
+        let last = stream::once(future::ready(Ok(format!("--{}--\r\n", self.boundary()).into())));
         Box::pin(stream.chain(last))
     }
 
@@ -186,15 +172,10 @@ impl Form {
         T: Into<Cow<'static, str>>,
     {
         // start with boundary
-        let boundary = stream::once(future::ready(Ok(
-            format!("--{}\r\n", self.boundary()).into()
-        )));
+        let boundary = stream::once(future::ready(Ok(format!("--{}\r\n", self.boundary()).into())));
         // append headers
         let header = stream::once(future::ready(Ok({
-            let mut h = self
-                .inner
-                .percent_encoding
-                .encode_headers(&name.into(), &part.meta);
+            let mut h = self.inner.percent_encoding.encode_headers(&name.into(), &part.meta);
             h.extend_from_slice(b"\r\n\r\n");
             h.into()
         })));
@@ -205,24 +186,16 @@ impl Form {
             .chain(stream::once(future::ready(Ok("\r\n".into()))))
     }
 
-    pub(crate) fn compute_length(&mut self) -> Option<u64> {
-        self.inner.compute_length()
-    }
+    pub(crate) fn compute_length(&mut self) -> Option<u64> { self.inner.compute_length() }
 
     fn with_inner<F>(self, func: F) -> Self
-    where
-        F: FnOnce(FormParts<Part>) -> FormParts<Part>,
-    {
-        Form {
-            inner: func(self.inner),
-        }
+    where F: FnOnce(FormParts<Part>) -> FormParts<Part> {
+        Form { inner: func(self.inner) }
     }
 }
 
 impl fmt::Debug for Form {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.inner.fmt_fields("Form", f)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { self.inner.fmt_fields("Form", f) }
 }
 
 // ===== impl Part =====
@@ -230,9 +203,7 @@ impl fmt::Debug for Form {
 impl Part {
     /// Makes a text parameter.
     pub fn text<T>(value: T) -> Part
-    where
-        T: Into<Cow<'static, str>>,
-    {
+    where T: Into<Cow<'static, str>> {
         let body = match value.into() {
             Cow::Borrowed(slice) => Body::from(slice),
             Cow::Owned(string) => Body::from(string),
@@ -242,9 +213,7 @@ impl Part {
 
     /// Makes a new parameter from arbitrary bytes.
     pub fn bytes<T>(value: T) -> Part
-    where
-        T: Into<Cow<'static, [u8]>>,
-    {
+    where T: Into<Cow<'static, [u8]>> {
         let body = match value.into() {
             Cow::Borrowed(slice) => Body::from(slice),
             Cow::Owned(vec) => Body::from(vec),
@@ -253,9 +222,7 @@ impl Part {
     }
 
     /// Makes a new parameter from an arbitrary stream.
-    pub fn stream<T: Into<Body>>(value: T) -> Part {
-        Part::new(value.into(), None)
-    }
+    pub fn stream<T: Into<Body>>(value: T) -> Part { Part::new(value.into(), None) }
 
     /// Makes a new parameter from an arbitrary stream with a known length. This is particularly
     /// useful when adding something like file contents as a stream, where you can know the content
@@ -273,9 +240,7 @@ impl Part {
     #[cfg_attr(docsrs, doc(cfg(feature = "stream")))]
     pub async fn file<T: AsRef<Path>>(path: T) -> io::Result<Part> {
         let path = path.as_ref();
-        let file_name = path
-            .file_name()
-            .map(|filename| filename.to_string_lossy().into_owned());
+        let file_name = path.file_name().map(|filename| filename.to_string_lossy().into_owned());
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let mime = mime_guess::from_ext(ext).first_or_octet_stream();
         let file = File::open(path).await?;
@@ -286,19 +251,11 @@ impl Part {
         }
         .mime(mime);
 
-        Ok(if let Some(file_name) = file_name {
-            field.file_name(file_name)
-        } else {
-            field
-        })
+        Ok(if let Some(file_name) = file_name { field.file_name(file_name) } else { field })
     }
 
     fn new(value: Body, body_length: Option<u64>) -> Part {
-        Part {
-            meta: PartMetadata::new(),
-            value,
-            body_length,
-        }
+        Part { meta: PartMetadata::new(), value, body_length }
     }
 
     /// Tries to set the mime of this part.
@@ -307,15 +264,11 @@ impl Part {
     }
 
     // Re-export when mime 0.4 is available, with split MediaType/MediaRange.
-    fn mime(self, mime: Mime) -> Part {
-        self.with_inner(move |inner| inner.mime(mime))
-    }
+    fn mime(self, mime: Mime) -> Part { self.with_inner(move |inner| inner.mime(mime)) }
 
     /// Sets the filename, builder style.
     pub fn file_name<T>(self, filename: T) -> Part
-    where
-        T: Into<Cow<'static, str>>,
-    {
+    where T: Into<Cow<'static, str>> {
         self.with_inner(move |inner| inner.file_name(filename))
     }
 
@@ -325,13 +278,8 @@ impl Part {
     }
 
     fn with_inner<F>(self, func: F) -> Self
-    where
-        F: FnOnce(PartMetadata) -> PartMetadata,
-    {
-        Part {
-            meta: func(self.meta),
-            ..self
-        }
+    where F: FnOnce(PartMetadata) -> PartMetadata {
+        Part { meta: func(self.meta), ..self }
     }
 }
 
@@ -346,16 +294,10 @@ impl fmt::Debug for Part {
 
 impl PartProps for Part {
     fn value_len(&self) -> Option<u64> {
-        if self.body_length.is_some() {
-            self.body_length
-        } else {
-            self.value.content_length()
-        }
+        if self.body_length.is_some() { self.body_length } else { self.value.content_length() }
     }
 
-    fn metadata(&self) -> &PartMetadata {
-        &self.meta
-    }
+    fn metadata(&self) -> &PartMetadata { &self.meta }
 }
 
 // ===== impl FormParts =====
@@ -370,15 +312,11 @@ impl<P: PartProps> FormParts<P> {
         }
     }
 
-    pub(crate) fn boundary(&self) -> &str {
-        &self.boundary
-    }
+    pub(crate) fn boundary(&self) -> &str { &self.boundary }
 
     /// Adds a customized Part.
     pub(crate) fn part<T>(mut self, name: T, part: P) -> Self
-    where
-        T: Into<Cow<'static, str>>,
-    {
+    where T: Into<Cow<'static, str>> {
         self.fields.push((name.into(), part));
         self
     }
@@ -455,11 +393,7 @@ impl<P: fmt::Debug> FormParts<P> {
 
 impl PartMetadata {
     pub(crate) fn new() -> Self {
-        PartMetadata {
-            mime: None,
-            file_name: None,
-            headers: HeaderMap::default(),
-        }
+        PartMetadata { mime: None, file_name: None, headers: HeaderMap::default() }
     }
 
     pub(crate) fn mime(mut self, mime: Mime) -> Self {
@@ -468,17 +402,13 @@ impl PartMetadata {
     }
 
     pub(crate) fn file_name<T>(mut self, filename: T) -> Self
-    where
-        T: Into<Cow<'static, str>>,
-    {
+    where T: Into<Cow<'static, str>> {
         self.file_name = Some(filename.into());
         self
     }
 
     pub(crate) fn headers<T>(mut self, headers: T) -> Self
-    where
-        T: Into<HeaderMap>,
-    {
+    where T: Into<HeaderMap> {
         self.headers = headers.into();
         self
     }
@@ -497,12 +427,8 @@ impl PartMetadata {
 }
 
 // https://url.spec.whatwg.org/#fragment-percent-encode-set
-const FRAGMENT_ENCODE_SET: &AsciiSet = &percent_encoding::CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`');
+const FRAGMENT_ENCODE_SET: &AsciiSet =
+    &percent_encoding::CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
 // https://url.spec.whatwg.org/#path-percent-encode-set
 const PATH_ENCODE_SET: &AsciiSet = &FRAGMENT_ENCODE_SET.add(b'#').add(b'?').add(b'{').add(b'}');
@@ -600,20 +526,18 @@ fn gen_boundary() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use futures_util::stream;
-    use futures_util::TryStreamExt;
     use std::future;
+
+    use futures_util::{TryStreamExt, stream};
     use tokio::{self, runtime};
+
+    use super::*;
 
     #[test]
     fn form_empty() {
         let form = Form::new();
 
-        let rt = runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("new rt");
+        let rt = runtime::Builder::new_current_thread().enable_all().build().expect("new rt");
         let body = form.stream().into_stream();
         let s = body.map_ok(|try_c| try_c.to_vec()).try_concat();
 
@@ -628,19 +552,15 @@ mod tests {
                 "reader1",
                 Part::stream(Body::stream(stream::once(future::ready::<
                     Result<String, crate::Error>,
-                >(Ok(
-                    "part1".to_owned()
-                ))))),
+                >(Ok("part1".to_owned()))))),
             )
             .part("key1", Part::text("value1"))
-            .part("key2", Part::text("value2").mime(mime::IMAGE_BMP))
+            .part("key2", Part::text("value2").mime(mime_guess::mime::IMAGE_BMP))
             .part(
                 "reader2",
                 Part::stream(Body::stream(stream::once(future::ready::<
                     Result<String, crate::Error>,
-                >(Ok(
-                    "part2".to_owned()
-                ))))),
+                >(Ok("part2".to_owned()))))),
             )
             .part("key3", Part::text("value3").file_name("filename"));
         form.inner.boundary = "boundary".to_string();
@@ -660,26 +580,20 @@ mod tests {
              --boundary\r\n\
              Content-Disposition: form-data; name=\"key3\"; filename=\"filename\"\r\n\r\n\
              value3\r\n--boundary--\r\n";
-        let rt = runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("new rt");
+        let rt = runtime::Builder::new_current_thread().enable_all().build().expect("new rt");
         let body = form.stream().into_stream();
         let s = body.map(|try_c| try_c.map(|r| r.to_vec())).try_concat();
 
         let out = rt.block_on(s).unwrap();
         // These prints are for debug purposes in case the test fails
-        println!(
-            "START REAL\n{}\nEND REAL",
-            std::str::from_utf8(&out).unwrap()
-        );
+        println!("START REAL\n{}\nEND REAL", std::str::from_utf8(&out).unwrap());
         println!("START EXPECTED\n{expected}\nEND EXPECTED");
         assert_eq!(std::str::from_utf8(&out).unwrap(), expected);
     }
 
     #[test]
     fn stream_to_end_with_header() {
-        let mut part = Part::text("value2").mime(mime::IMAGE_BMP);
+        let mut part = Part::text("value2").mime(mime_guess::mime::IMAGE_BMP);
         let mut headers = HeaderMap::new();
         headers.insert("Hdr3", "/a/b/c".parse().unwrap());
         part = part.headers(headers);
@@ -692,19 +606,13 @@ mod tests {
                         \r\n\
                         value2\r\n\
                         --boundary--\r\n";
-        let rt = runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("new rt");
+        let rt = runtime::Builder::new_current_thread().enable_all().build().expect("new rt");
         let body = form.stream().into_stream();
         let s = body.map(|try_c| try_c.map(|r| r.to_vec())).try_concat();
 
         let out = rt.block_on(s).unwrap();
         // These prints are for debug purposes in case the test fails
-        println!(
-            "START REAL\n{}\nEND REAL",
-            std::str::from_utf8(&out).unwrap()
-        );
+        println!("START REAL\n{}\nEND REAL", std::str::from_utf8(&out).unwrap());
         println!("START EXPECTED\n{expected}\nEND EXPECTED");
         assert_eq!(std::str::from_utf8(&out).unwrap(), expected);
     }
@@ -714,9 +622,7 @@ mod tests {
         // Setup an arbitrary data stream
         let stream_data = b"just some stream data";
         let stream_len = stream_data.len();
-        let stream_data = stream_data
-            .chunks(3)
-            .map(|c| Ok::<_, std::io::Error>(Bytes::from(c)));
+        let stream_data = stream_data.chunks(3).map(|c| Ok::<_, std::io::Error>(Bytes::from(c)));
         let the_stream = futures_util::stream::iter(stream_data);
 
         let bytes_data = b"some bytes data".to_vec();

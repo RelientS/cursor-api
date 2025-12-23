@@ -1,12 +1,11 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::{fmt, str::FromStr};
+use core::fmt;
+use core::str::FromStr;
 
-use super::{
-    hash::{Hash, HashError},
-    timestamp_header::TimestampHeader,
-};
-use crate::common::utils::hex::HEX_DECODE_TABLE;
+use super::hash::{Hash, HashError};
+use super::timestamp_header;
+use crate::common::utils::hex::HEX_TABLE;
 
 #[derive(Debug)]
 pub enum ChecksumError {
@@ -55,12 +54,7 @@ impl Checksum {
     pub fn new(first: Hash, second: Hash) -> Self { Self { first, second } }
 
     #[inline]
-    pub fn random() -> Self {
-        Self {
-            first: Hash::random(),
-            second: Hash::random(),
-        }
-    }
+    pub fn random() -> Self { Self { first: Hash::random(), second: Hash::random() } }
 
     pub fn repair(s: &str) -> Self {
         let bytes = s.as_bytes();
@@ -87,10 +81,7 @@ impl Checksum {
             None => return Self::random(),
         };
 
-        Self {
-            first,
-            second: Hash::random(),
-        }
+        Self { first, second: Hash::random() }
     }
 
     // 处理 129 字节格式：设备哈希(64) + '/' + MAC哈希(64)
@@ -149,21 +140,13 @@ impl Checksum {
         unsafe {
             let ptr = bytes.as_ptr() as *const Hash;
 
-            Self {
-                first: ptr.read(),
-                second: ptr.add(1).read(),
-            }
+            Self { first: ptr.read(), second: ptr.add(1).read() }
         }
     }
 
     #[inline]
     pub const fn into_bytes(self) -> [u8; 64] {
-        unsafe {
-            ::core::intrinsics::transmute_unchecked::<[Hash; 2], [u8; 64]>([
-                self.first,
-                self.second,
-            ])
-        }
+        unsafe { ::core::intrinsics::transmute::<[Hash; 2], [u8; 64]>([self.first, self.second]) }
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -174,7 +157,7 @@ impl Checksum {
         // SAFETY: `buf` is guaranteed to be at least `LEN` bytes
         // SAFETY: The encoded buffer is ASCII encoded
         unsafe {
-            ::core::ptr::copy_nonoverlapping(TimestampHeader::as_ptr(), buf.as_mut_ptr(), 8);
+            ::core::ptr::write(buf.as_mut_ptr().cast(), timestamp_header::read());
 
             self.first.to_str(&mut *(dst.add(8) as *mut [u8; 64]));
             *dst.add(72) = b'/';
@@ -210,13 +193,8 @@ const fn decode_hex_hash(hex_bytes: &[u8; 64]) -> Option<Hash> {
         let hi = hex_bytes[pos];
         let lo = hex_bytes[pos + 1];
 
-        // 检查是否为 ASCII
-        if hi >= 128 || lo >= 128 {
-            return None;
-        }
-
-        let high = HEX_DECODE_TABLE[hi as usize];
-        let low = HEX_DECODE_TABLE[lo as usize];
+        let high = HEX_TABLE[hi as usize];
+        let low = HEX_TABLE[lo as usize];
 
         // 检查是否为有效的十六进制字符
         if high == 0xFF || low == 0xFF {

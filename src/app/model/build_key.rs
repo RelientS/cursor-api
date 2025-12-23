@@ -1,6 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 use crate::{app::constant::COMMA, core::constant::Models};
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct BuildKeyRequest {
@@ -11,7 +10,7 @@ pub struct BuildKeyRequest {
     pub session_id: uuid::Uuid,
     pub secret: Option<String>,
     pub proxy_name: Option<String>,
-    pub timezone: Option<String>,
+    pub timezone: Option<chrono_tz::Tz>,
     pub gcpp_host: Option<super::GcppHost>,
     pub disable_vision: Option<bool>,
     pub enable_slow_pool: Option<bool>,
@@ -26,9 +25,7 @@ pub struct UsageCheckModelConfig {
 
 impl<'de> Deserialize<'de> for UsageCheckModelConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         #[derive(Deserialize)]
         struct Helper {
             r#type: UsageCheckModelType,
@@ -51,21 +48,11 @@ impl<'de> Deserialize<'de> for UsageCheckModelConfig {
                 .collect()
         };
 
-        Ok(UsageCheckModelConfig {
-            model_type: helper.r#type,
-            model_ids,
-        })
+        Ok(UsageCheckModelConfig { model_type: helper.r#type, model_ids })
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UsageCheckModelType {
-    Default,
-    Disabled,
-    All,
-    Custom,
-}
+pub type UsageCheckModelType = crate::core::config::configured_key::usage_check_model::Type;
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]

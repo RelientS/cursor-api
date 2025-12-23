@@ -1,0 +1,10 @@
+[package]
+name = "macros"
+version = "0.1.0"
+edition = "2024"
+authors = ["wisdgod <nav@wisdgod.com>"]
+license = "MIT OR Apache-2.0"
+description = "A Proto3 file dependency analyzer and optimizer"
+repository = "https://github.com/wisdgod/ppp"
+
+[dependencies]

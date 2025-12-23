@@ -257,8 +257,7 @@ compile_error!(
 
 // Ignore `unused_crate_dependencies` warnings.
 // Used in many features that they're not worth making it optional.
-use futures_core as _;
-use sync_wrapper as _;
+use {futures_core as _, sync_wrapper as _};
 
 macro_rules! if_wasm {
     ($($item:item)*) => {$(
@@ -274,9 +273,7 @@ macro_rules! if_hyper {
     )*}
 }
 
-pub use http::header;
-pub use http::Method;
-pub use http::{StatusCode, Version};
+pub use http::{Method, StatusCode, Version, header};
 pub use url::Url;
 
 // universal mods
@@ -376,9 +373,13 @@ if_hyper! {
     pub mod dns;
     mod proxy;
     pub mod redirect;
+    pub mod retry;
     #[cfg(feature = "__tls")]
     pub mod tls;
     mod util;
+
+    #[cfg(docsrs)]
+    pub use connect::uds::UnixSocketProvider;
 }
 
 if_wasm! {

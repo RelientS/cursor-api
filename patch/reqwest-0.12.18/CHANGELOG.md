@@ -1,3 +1,20 @@
+## v0.12.24
+
+- Refactor cookie handling to an internal middleware.
+- Refactor internal random generator.
+- Refactor base64 encoding to reduce a copy.
+- Documentation updates.
+
+## v0.12.23
+
+- Add `ClientBuilder::unix_socket(path)` option that will force all requests over that Unix Domain Socket.
+- Add `ClientBuilder::retry(policy)` and `reqwest::retry::Builder` to configure automatic retries.
+- Add `ClientBuilder::dns_resolver2()` with more ergonomic argument bounds, allowing more resolver implementations.
+- Add `http3_*` options to `blocking::ClientBuilder`.
+- Fix default TCP timeout values to enabled and faster.
+- Fix SOCKS proxies to default to port 1080
+- (wasm) Add cache methods to `RequestBuilder`.
+
 ## v0.12.22
 
 - Fix socks proxies when resolving IPv6 destinations.

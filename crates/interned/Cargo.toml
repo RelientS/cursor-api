@@ -1,0 +1,54 @@
+[package]
+name = "interned"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# HashMap 实现 - 启用 nightly 优化
+hashbrown = { version = "0.16", default-features = false, features = [
+    "nightly",     # 🚀 SIMD 优化、unstable APIs
+    "raw-entry",   # 用于高级 HashMap 操作
+    "inline-more", # 更激进的内联优化
+    #"allocator-api2",    # 自定义分配器支持
+] }
+
+# RwLock 实现 - 启用性能优化
+parking_lot = { version = "0.12", features = [
+    "nightly",               # 🚀 unstable 优化
+    "hardware-lock-elision", # Intel TSX 硬件锁优化（如果可用）
+    #"send_guard",            # 允许跨线程传递 MutexGuard
+] }
+
+# 哈希算法 - 启用硬件加速
+ahash = { version = "0.8", default-features = false, features = [
+    "runtime-rng",     # 运行时随机种子（安全）
+    #"nightly-arm-aes", # 🚀 ARM AES 指令优化
+] }
+
+manually_init.workspace = true
+
+serde = { version = "1.0", optional = true }
+
+[features]
+default = ["serde"]
+nightly = []
+serde = ["dep:serde", "hashbrown/serde", "ahash/serde"]
+
+#[profile.release]
+#opt-level = 3
+#lto = "fat"       # 全局 LTO
+#codegen-units = 1 # 单编译单元，最大优化
+#panic = "abort"   # 减小二进制体积
+#strip = true      # 移除符号信息
+
+#[profile.bench]
+#inherits = "release"
+
+# Nightly 特性门控
+[package.metadata.docs.rs]
+rustc-args = ["--cfg", "docsrs"]
+all-features = true

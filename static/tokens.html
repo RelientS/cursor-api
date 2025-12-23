@@ -1739,7 +1739,7 @@
       // 获取选中的token对象 - 格式: [index, alias, tokenData]
       const selectedTokenArrs = allTokens.filter((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        return selectedTokens.has(tokenData.bundle.primary_token);
+        return selectedTokens.has(tokenData.primary_token);
       });
       const selectionSize = selectedTokenArrs.length;
 
@@ -1751,7 +1751,7 @@
 
       selectedTokenArrs.forEach((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        const proxy = tokenData.bundle.proxy || ""; // 获取选中 token 的代理
+        const proxy = tokenData.proxy || ""; // 获取选中 token 的代理
         // 确保计数对象里有这个key
         if (!(proxy in selectedProxyUsage)) {
           selectedProxyUsage[proxy] = 0;
@@ -1885,7 +1885,7 @@
       const aliasesToUpdate = [...selectedTokens].map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });
@@ -1947,18 +1947,17 @@
         .map((tokenArr, idx) => {
           // 格式: [index, alias, tokenData]
           const [index, alias, tokenData] = tokenArr;
-          const bundle = tokenData.bundle || {};
-          const user = bundle.user || {};
+          const user = tokenData.user || {};
           const stripe = tokenData.stripe || {};
           const usage = tokenData.usage || {};
           const premium = usage.premium || {};
-          const token = bundle.primary_token;
-          const checksum = bundle.checksum
-            ? `${bundle.checksum.first}${bundle.checksum.second}`
+          const token = tokenData.primary_token;
+          const checksum = tokenData.checksum
+            ? `${tokenData.checksum.first}${tokenData.checksum.second}`
             : "";
-          const status = tokenData.status;
-          const timezone = bundle.timezone || "";
-          const proxy = bundle.proxy || "";
+          const disabled = !tokenData.status.enabled;
+          const timezone = tokenData.timezone || "";
+          const proxy = tokenData.proxy || "";
 
           const displayName =
             alias || user.email || token.substring(0, 15) + "...";
@@ -1966,7 +1965,7 @@
           return `
         <tr data-token="${token}" data-alias="${alias}" data-checksum="${checksum}" data-index="${idx}" class="${selectedTokens.has(token) ? "selected" : ""}">
           <td>
-            <span class="status-indicator ${status === "disabled" ? "status-disabled" : status === undefined ? "status-enabled" : "status-" + status}"></span>
+            <span class="status-indicator ${disabled ? "status-disabled" : "status-enabled"}"></span>
             <span class="file-icon">🔑</span>
             ${displayName}
           </td>
@@ -2076,14 +2075,13 @@
       const filteredTokens = allTokens.filter((tokenArr) => {
         // 格式: [index, alias, tokenData]
         const [index, alias, tokenData] = tokenArr;
-        const bundle = tokenData.bundle || {};
-        const user = bundle.user || {};
+        const user = tokenData.user || {};
         const stripe = tokenData.stripe || {};
         const usage = tokenData.usage || {};
         const premium = usage.premium || {};
-        const token = bundle.primary_token;
-        const timezone = bundle.timezone || "";
-        const proxy = bundle.proxy || "";
+        const token = tokenData.primary_token;
+        const timezone = tokenData.timezone || "";
+        const proxy = tokenData.proxy || "";
 
         // 搜索条件
         const emailMatch = (user.email || "")
@@ -2277,20 +2275,19 @@
       // 查找token对象 - 格式: [index, alias, tokenData]
       const tokenArr = allTokens.find((arr) => {
         const [_, __, tokenData] = arr;
-        return tokenData.bundle.primary_token === token;
+        return tokenData.primary_token === token;
       });
       if (!tokenArr) return;
 
       const [index, alias, tokenData] = tokenArr;
-      const bundle = tokenData.bundle || {};
-      const user = bundle.user || {};
+      const user = tokenData.user || {};
       const stripe = tokenData.stripe || {};
       const usage = tokenData.usage || {};
       const premium = usage.premium || {};
-      const timezone = bundle.timezone || "-";
-      const proxy = bundle.proxy || "-";
-      const checksum = bundle.checksum
-        ? `${bundle.checksum.first}${bundle.checksum.second}`
+      const timezone = tokenData.timezone || "-";
+      const proxy = tokenData.proxy || "-";
+      const checksum = tokenData.checksum
+        ? `${tokenData.checksum.first}${tokenData.checksum.second}`
         : "-";
 
       document.getElementById("detailsTitle").textContent =
@@ -2304,7 +2301,7 @@
         </div>
         <div class="details-property">
           <div class="details-property-name">令牌</div>
-          <div class="details-property-value">${bundle.primary_token}</div>
+          <div class="details-property-value">${tokenData.primary_token}</div>
         </div>
         <div class="details-property">
           <div class="details-property-name">校验和</div>
@@ -2312,11 +2309,11 @@
         </div>
         <div class="details-property">
           <div class="details-property-name">Config Version</div>
-          <div class="details-property-value">${bundle.config_version || "-"}</div>
+          <div class="details-property-value">${tokenData.config_version || "-"}</div>
         </div>
         <div class="details-property">
           <div class="details-property-name">Session ID</div>
-          <div class="details-property-value">${bundle.session_id || "-"}</div>
+          <div class="details-property-value">${tokenData.session_id || "-"}</div>
         </div>
         <div class="details-property">
           <div class="details-property-name">时区</div>
@@ -2340,15 +2337,11 @@
         </div>
         <div class="details-property">
           <div class="details-property-name">用户 ID</div>
-          <div class="details-property-value">${user.id || "-"}</div>
+          <div class="details-property-value">${user.user_id || "-"}</div>
         </div>
         <div class="details-property">
           <div class="details-property-name">创建时间</div>
           <div class="details-property-value">${formatDate(user.created_at) || "-"}</div>
-        </div>
-        <div class="details-property">
-          <div class="details-property-name">更新时间</div>
-          <div class="details-property-value">${formatDate(user.updated_at) || "-"}</div>
         </div>
       `;
     }
@@ -2391,7 +2384,7 @@
       // 获取选中的token对象 - 格式: [index, alias, tokenData]
       const selectedTokenArrs = allTokens.filter((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        return selectedTokens.has(tokenData.bundle.primary_token);
+        return selectedTokens.has(tokenData.primary_token);
       });
       const tokensToCopy = selectedTokenArrs
         .map(formatTokenForCopy)
@@ -2418,9 +2411,9 @@
      */
     function formatTokenForCopy(tokenArr) {
       const [index, alias, tokenData] = tokenArr;
-      const token = tokenData.bundle.primary_token;
-      const checksum = tokenData.bundle.checksum
-        ? `${tokenData.bundle.checksum.first}${tokenData.bundle.checksum.second}`
+      const token = tokenData.primary_token;
+      const checksum = tokenData.checksum
+        ? `${tokenData.checksum.first}${tokenData.checksum.second}`
         : "";
       const checksumPart = checksum ? `,${checksum}` : "";
 
@@ -2464,7 +2457,7 @@
       const aliasesToDelete = tokensToDelete.map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });
@@ -2502,7 +2495,7 @@
       const aliasesToRefresh = [...selectedTokens].map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });
@@ -2538,7 +2531,7 @@
       const aliasesToRefresh = [...selectedTokens].map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });
@@ -2594,16 +2587,12 @@
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => line && !line.startsWith("#"))
-        .map((line) => ({
-          ...parseTokenLine(line),
-          status: status,
-        }));
+        .map((line) => parseTokenLine(line));
 
       const data = await makeAuthenticatedRequest("/tokens/add", {
         body: JSON.stringify({
           tokens: tokenList,
-          tags: {},
-          status: status,
+          status: status !== "disabled",
         }),
       });
 
@@ -2740,13 +2729,12 @@
       if (!checksumToUse) {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === tokenToUse;
+          return tokenData.primary_token === tokenToUse;
         });
         if (tokenArr) {
           const [_, __, tokenData] = tokenArr;
-          const bundle = tokenData.bundle;
-          checksumToUse = bundle.checksum
-            ? `${bundle.checksum.first}${bundle.checksum.second}`
+          checksumToUse = tokenData.checksum
+            ? `${tokenData.checksum.first}${tokenData.checksum.second}`
             : "";
         }
       }
@@ -2775,7 +2763,7 @@
       const token = document.getElementById("keyToken").textContent; // 查找token对象 - 格式: [index, alias, tokenData]
       const tokenArr = allTokens.find((arr) => {
         const [_, __, tokenData] = arr;
-        return tokenData.bundle.primary_token === token;
+        return tokenData.primary_token === token;
       });
 
       if (!token || !tokenArr) {
@@ -2784,29 +2772,28 @@
       }
 
       const [_, __, tokenData] = tokenArr;
-      const bundle = tokenData.bundle;
 
       // 验证必需字段
       if (
-        !bundle.checksum ||
-        !bundle.checksum.first ||
-        !bundle.checksum.second
+        !tokenData.checksum ||
+        !tokenData.checksum.first ||
+        !tokenData.checksum.second
       ) {
         showToast("Token缺少校验和信息，无法生成Key", "error");
         return;
       }
 
-      if (!bundle.client_key) {
+      if (!tokenData.client_key) {
         showToast("Token缺少客户端密钥，无法生成Key", "error");
         return;
       }
 
-      if (!bundle.config_version) {
+      if (!tokenData.config_version) {
         showToast("Token缺少配置版本，无法生成Key", "error");
         return;
       }
 
-      if (!bundle.session_id) {
+      if (!tokenData.session_id) {
         showToast("Token缺少会话ID，无法生成Key", "error");
         return;
       }
@@ -2821,14 +2808,14 @@
 
       // 构建请求体
       const requestBody = {
-        token: bundle.primary_token,
+        token: tokenData.primary_token,
         checksum: {
-          first: bundle.checksum.first,
-          second: bundle.checksum.second,
+          first: tokenData.checksum.first,
+          second: tokenData.checksum.second,
         },
-        client_key: bundle.client_key,
-        config_version: bundle.config_version,
-        session_id: bundle.session_id,
+        client_key: tokenData.client_key,
+        config_version: tokenData.config_version,
+        session_id: tokenData.session_id,
       };
 
       // 添加可选参数
@@ -2847,20 +2834,20 @@
         requestBody.proxy_name = proxyName;
       } else {
         // 否则使用Token的bundle中设置的代理
-        const tokenProxyName = bundle.proxy || "";
+        const tokenProxyName = tokenData.proxy || "";
         if (tokenProxyName) {
           requestBody.proxy_name = tokenProxyName;
         }
       }
 
       // 时区设置
-      if (bundle.timezone) {
-        requestBody.timezone = bundle.timezone;
+      if (tokenData.timezone) {
+        requestBody.timezone = tokenData.timezone;
       }
 
       // GCPP Host设置
-      if (bundle.gcpp_host) {
-        requestBody.gcpp_host = bundle.gcpp_host;
+      if (tokenData.gcpp_host) {
+        requestBody.gcpp_host = tokenData.gcpp_host;
       }
 
       if (usageCheckType) {
@@ -3077,12 +3064,11 @@
       // 查找token对象 - 格式: [index, alias, tokenData]
       const tokenArr = allTokens.find((arr) => {
         const [_, __, tokenData] = arr;
-        return tokenData.bundle.primary_token === token;
+        return tokenData.primary_token === token;
       });
       if (!tokenArr) return;
 
       const [_, __, tokenData] = tokenArr;
-      const bundle = tokenData.bundle;
 
       currentEditingToken = token;
 
@@ -3102,7 +3088,7 @@
       const proxyUsage = getProxyUsageStats();
 
       // 获取当前选中的代理
-      const currentProxy = bundle.proxy || "";
+      const currentProxy = tokenData.proxy || "";
 
       // 添加代理选项
       proxyList.forEach((proxy) => {
@@ -3139,7 +3125,7 @@
       // 获取token的别名 - 格式: [index, alias, tokenData]
       const tokenArr = allTokens.find((arr) => {
         const [_, __, tokenData] = arr;
-        return tokenData.bundle.primary_token === currentEditingToken;
+        return tokenData.primary_token === currentEditingToken;
       });
       const alias = tokenArr ? tokenArr[1] : currentEditingToken; // tokenArr[1] 是 alias
 
@@ -3169,7 +3155,7 @@
       const proxyUsage = {};
       allTokens.forEach((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        const proxy = tokenData.bundle.proxy || "";
+        const proxy = tokenData.proxy || "";
         proxyUsage[proxy] = (proxyUsage[proxy] || 0) + 1;
       });
       return proxyUsage;
@@ -3187,13 +3173,12 @@
       currentEditingToken = [...selectedTokens][0]; // 查找token对象 - 格式: [index, alias, tokenData]
       const tokenArr = allTokens.find((arr) => {
         const [_, __, tokenData] = arr;
-        return tokenData.bundle.primary_token === currentEditingToken;
+        return tokenData.primary_token === currentEditingToken;
       });
       if (!tokenArr) return;
 
       const [_, alias, tokenData] = tokenArr;
-      const bundle = tokenData.bundle || {};
-      const user = bundle.user || {};
+      const user = tokenData.user || {};
 
       // 使用邮箱或者token的简短显示
       const email = user.email || "";
@@ -3214,7 +3199,7 @@
       initializeTimezoneList();
 
       // 设置当前选中的时区
-      const currentTimezone = bundle.timezone || "";
+      const currentTimezone = tokenData.timezone || "";
       highlightSelectedTimezone(currentTimezone);
 
       // 显示模态框
@@ -3402,7 +3387,7 @@
       const aliasesToUpdate = [...selectedTokens].map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });
@@ -3445,7 +3430,7 @@
       const timezoneUsage = {};
       allTokens.forEach((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        const timezone = tokenData.bundle.timezone || "";
+        const timezone = tokenData.timezone || "";
         if (timezone) {
           // 只统计非空时区
           timezoneUsage[timezone] = (timezoneUsage[timezone] || 0) + 1;
@@ -3477,7 +3462,7 @@
       const aliasesToUpdate = [...selectedTokens].map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });
@@ -3488,7 +3473,7 @@
         const result = await makeAuthenticatedRequest("/tokens/status/set", {
           body: JSON.stringify({
             aliases: aliasesToUpdate,
-            status: status,
+            enabled: status !== "disabled",
           }),
         });
 
@@ -3524,7 +3509,7 @@
       // 获取选中的token对象 - 格式: [index, alias, tokenData]
       const selectedTokenArrs = allTokens.filter((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        return selectedTokens.has(tokenData.bundle.primary_token);
+        return selectedTokens.has(tokenData.primary_token);
       });
       const selectionSize = selectedTokenArrs.length;
 
@@ -3536,9 +3521,7 @@
 
       selectedTokenArrs.forEach((tokenArr) => {
         const [_, __, tokenData] = tokenArr;
-        // 将 undefined 或 'enabled' 状态视为 'enabled'
-        const status =
-          tokenData.status === "disabled" ? "disabled" : "enabled";
+        const status = !tokenData.status.enabled ? "disabled" : "enabled";
         selectedStatusStats[status]++; // 增加对应状态的计数
       });
 
@@ -3613,13 +3596,12 @@
       // 获取当前别名 - 格式: [index, alias, tokenData]
       const tokenArr = allTokens.find((arr) => {
         const [_, __, tokenData] = arr;
-        return tokenData.bundle.primary_token === token;
+        return tokenData.primary_token === token;
       });
       if (!tokenArr) return;
 
       const [index, currentAlias, tokenData] = tokenArr;
-      const bundle = tokenData.bundle || {};
-      const user = bundle.user || {};
+      const user = tokenData.user || {};
       const displayName =
         currentAlias || user.email || token.substring(0, 15) + "...";
 
@@ -3706,7 +3688,7 @@
       const aliasesToUpgrade = [...selectedTokens].map((token) => {
         const tokenArr = allTokens.find((arr) => {
           const [_, __, tokenData] = arr;
-          return tokenData.bundle.primary_token === token;
+          return tokenData.primary_token === token;
         });
         return tokenArr ? tokenArr[1] : token; // tokenArr[1] 是 alias
       });

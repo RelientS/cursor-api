@@ -1,9 +1,9 @@
-use futures::stream::Stream;
-use std::{
+use alloc::sync::Arc;
+use core::{
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
 };
+use futures::stream::Stream;
 use tokio::sync::Notify;
 
 /// 可通过外部信号控制 drop 的 Stream 包装器
@@ -21,27 +21,21 @@ pub struct DropHandle {
 }
 
 impl<S> DroppableStream<S>
-where
-    S: Stream + Unpin,
+where S: Stream + Unpin
 {
     /// 创建新的可控制 Stream 和其控制句柄
     pub fn new(stream: S) -> (Self, DropHandle) {
         let notify = Arc::new(Notify::new());
 
         (
-            Self {
-                stream: Some(stream),
-                notify: notify.clone(),
-                dropped: false,
-            },
+            Self { stream: Some(stream), notify: notify.clone(), dropped: false },
             DropHandle { notify },
         )
     }
 }
 
 impl<S> Stream for DroppableStream<S>
-where
-    S: Stream + Unpin,
+where S: Stream + Unpin
 {
     type Item = S::Item;
 
@@ -64,7 +58,7 @@ where
         }
 
         // 轮询内部 stream
-        if let Some(stream) = &mut this.stream {
+        if let Some(ref mut stream) = this.stream {
             Pin::new(stream).poll_next(cx)
         } else {
             Poll::Ready(None)

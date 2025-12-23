@@ -1,33 +1,33 @@
-use ::reqwest::{
-    Client, RequestBuilder,
+use crate::app::{
+    constant::{
+        CURSOR_API2_HOST, CURSOR_HOST,
+        header::{
+            AMZN_TRACE_ID, CLIENT_KEY, CONNECT_ACCEPT_ENCODING, CONNECT_CONTENT_ENCODING,
+            CONNECT_ES, CONNECT_PROTO, CONNECT_PROTOCOL_VERSION, CORS, CURSOR_CHECKSUM,
+            CURSOR_CLIENT_VERSION, CURSOR_CONFIG_VERSION, CURSOR_ORIGIN, CURSOR_REFERER_URL,
+            CURSOR_STREAMING, CURSOR_TIMEZONE, EMPTY, ENCODING, ENCODINGS, FALSE, FS_CLIENT_KEY,
+            GHOST_MODE, HEADER_VALUE_ACCEPT, JSON, KEEP_ALIVE, LANGUAGE, NEW_ONBOARDING_COMPLETED,
+            NO_CACHE, NONE, ONE, PRIORITY, PROTO, PROXY_HOST, REQUEST_ID, SAME_ORIGIN,
+            SEC_FETCH_DEST, SEC_FETCH_MODE, SEC_FETCH_SITE, SEC_GPC, SESSION_ID, TRAILERS, TRUE,
+            U_EQ_0, UA, VSCODE_ORIGIN, cursor_client_version, header_value_ua_cursor_latest,
+        },
+    },
+    lazy::{
+        PRI_REVERSE_PROXY_HOST, PUB_REVERSE_PROXY_HOST, USE_PRI_REVERSE_PROXY,
+        USE_PUB_REVERSE_PROXY, sessions_url, stripe_url, token_poll_url, token_refresh_url,
+        token_upgrade_url, usage_api_url,
+    },
+    model::ExtToken,
+};
+use http::{
     header::{
         ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, AUTHORIZATION, CACHE_CONTROL, CONNECTION,
-        CONTENT_LENGTH, CONTENT_TYPE, COOKIE, DNT, HOST, ORIGIN, PRAGMA, REFERER, TE, USER_AGENT,
+        CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, DNT, HOST, ORIGIN, PRAGMA, REFERER,
+        TE, USER_AGENT,
     },
+    method::Method,
 };
-
-use crate::{
-    app::{
-        constant::{
-            AMZN_TRACE_ID, AUTHORIZATION_BEARER_PREFIX, CLIENT_KEY, CONNECT_ACCEPT_ENCODING,
-            CONNECT_CONTENT_ENCODING, CONNECT_ES, CONNECT_PROTO, CONNECT_PROTOCOL_VERSION, CORS,
-            CURSOR_API2_HOST, CURSOR_CHECKSUM, CURSOR_CLIENT_VERSION, CURSOR_CONFIG_VERSION,
-            CURSOR_HOST, CURSOR_REFERER_URL, CURSOR_STREAMING, CURSOR_TIMEZONE, EMPTY, ENCODING,
-            ENCODINGS, FALSE, FS_CLIENT_KEY, GHOST_MODE, HEADER_VALUE_ACCEPT, JSON, KEEP_ALIVE,
-            LANGUAGE, NEW_ONBOARDING_COMPLETED, NO_CACHE, NONE, ONE, PRIORITY, PROTO, PROXY_HOST,
-            REQUEST_ID, SAME_ORIGIN, SEC_FETCH_DEST, SEC_FETCH_MODE, SEC_FETCH_SITE, SEC_GPC,
-            SESSION_ID, TRAILERS, TRUE, U_EQ_0, UA, VSCODE_ORIGIN, cursor_client_version,
-            header_value_ua_cursor_latest,
-        },
-        lazy::{
-            PRI_REVERSE_PROXY_HOST, PUB_REVERSE_PROXY_HOST, USE_PRI_REVERSE_PROXY,
-            USE_PUB_REVERSE_PROXY, sessions_url, stripe_url, token_poll_url, token_refresh_url,
-            token_upgrade_url, usage_api_url, user_api_url,
-        },
-        model::ExtToken,
-    },
-    common::utils::StringBuilder,
-};
+use reqwest::{Client, RequestBuilder};
 
 trait RequestBuilderExt: Sized {
     fn opt_header<K, V>(self, key: K, value: Option<V>) -> Self
@@ -50,6 +50,13 @@ trait RequestBuilderExt: Sized {
         <http::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
         http::HeaderValue: TryFrom<V>,
         <http::HeaderValue as TryFrom<V>>::Error: Into<http::Error>;
+
+    fn header_map<K, I, V, F: FnOnce(I) -> V>(self, key: K, value: I, f: F) -> Self
+    where
+        http::HeaderName: TryFrom<K>,
+        <http::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        http::HeaderValue: TryFrom<V>,
+        <http::HeaderValue as TryFrom<V>>::Error: Into<http::Error>;
 }
 
 impl RequestBuilderExt for RequestBuilder {
@@ -61,11 +68,7 @@ impl RequestBuilderExt for RequestBuilder {
         http::HeaderValue: TryFrom<V>,
         <http::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
-        if let Some(value) = value {
-            self.header(key, value)
-        } else {
-            self
-        }
+        if let Some(value) = value { self.header(key, value) } else { self }
     }
 
     #[inline]
@@ -76,11 +79,7 @@ impl RequestBuilderExt for RequestBuilder {
         http::HeaderValue: TryFrom<V>,
         <http::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
-        if let Some(value) = value {
-            self.header(key, f(value))
-        } else {
-            self
-        }
+        if let Some(value) = value { self.header(key, f(value)) } else { self }
     }
 
     #[inline]
@@ -91,64 +90,55 @@ impl RequestBuilderExt for RequestBuilder {
         http::HeaderValue: TryFrom<V>,
         <http::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
-        if condition {
-            self.header(key, value)
-        } else {
-            self
-        }
+        if condition { self.header(key, value) } else { self }
+    }
+
+    #[inline]
+    fn header_map<K, I, V, F: FnOnce(I) -> V>(self, key: K, value: I, f: F) -> Self
+    where
+        http::HeaderName: TryFrom<K>,
+        <http::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        http::HeaderValue: TryFrom<V>,
+        <http::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        self.header(key, f(value))
     }
 }
 
 #[inline]
 fn get_client_and_host<'a>(
     client: &Client,
-    method: http::Method,
+    method: Method,
     url: &'a str,
-    is_pri: bool,
+    use_pri: bool,
     real_host: &'a str,
 ) -> (RequestBuilder, &'a str) {
-    if is_pri && *USE_PRI_REVERSE_PROXY {
-        (
-            client.request(method, url).header(PROXY_HOST, real_host),
-            &PRI_REVERSE_PROXY_HOST,
-        )
-    } else if !is_pri && *USE_PUB_REVERSE_PROXY {
-        (
-            client.request(method, url).header(PROXY_HOST, real_host),
-            &PUB_REVERSE_PROXY_HOST,
-        )
+    if use_pri && *USE_PRI_REVERSE_PROXY {
+        (client.request(method, url).header(PROXY_HOST, real_host), &PRI_REVERSE_PROXY_HOST)
+    } else if !use_pri && *USE_PUB_REVERSE_PROXY {
+        (client.request(method, url).header(PROXY_HOST, real_host), &PUB_REVERSE_PROXY_HOST)
     } else {
         (client.request(method, url), real_host)
     }
 }
 
 pub(crate) struct AiServiceRequest<'a> {
-    pub(crate) ext_token: ExtToken,
+    pub(crate) ext_token: &'a ExtToken,
     pub(crate) fs_client_key: Option<http::HeaderValue>,
-    pub(crate) url: &'a str,
-    pub(crate) is_stream: bool,
-    pub(crate) trace_id: Option<[u8; 36]>,
-    pub(crate) is_pri: bool,
+    pub(crate) url: &'static str,
+    pub(crate) stream: bool,
+    pub(crate) compressed: bool,
+    pub(crate) trace_id: [u8; 36],
+    pub(crate) use_pri: bool,
     pub(crate) cookie: Option<http::HeaderValue>,
 }
 
-/// 返回预构建的 Cursor API 客户端
-///
-/// # 参数
-///
-/// * `auth_token` - 授权令牌
-/// * `checksum` - 校验和
-/// * `endpoint` - API 端点路径
-///
-/// # 返回
-///
-/// * `reqwest::RequestBuilder` - 配置好的请求构建器
 pub fn build_client_request(req: AiServiceRequest) -> RequestBuilder {
     let (builder, host) = get_client_and_host(
         &req.ext_token.get_client(),
-        http::Method::POST,
+        Method::POST,
         req.url,
-        req.is_pri,
+        req.use_pri,
         CURSOR_API2_HOST,
     );
 
@@ -157,43 +147,30 @@ pub fn build_client_request(req: AiServiceRequest) -> RequestBuilder {
     builder
         .version(http::Version::HTTP_2)
         .header(HOST, host)
-        .header_if(ACCEPT_ENCODING, ENCODING, !req.is_stream)
-        .header(AUTHORIZATION, {
-            let mut v = __unwrap!(http::HeaderValue::from_str(
-                &StringBuilder::with_capacity(2)
-                    .append(AUTHORIZATION_BEARER_PREFIX)
-                    .append(req.ext_token.primary_token.as_str())
-                    .build()
-            ));
-            v.set_sensitive(true);
-            v
-        })
-        .header_if(CONNECT_ACCEPT_ENCODING, ENCODING, req.is_stream)
-        .header_if(CONNECT_CONTENT_ENCODING, ENCODING, req.is_stream)
+        .header_if(ACCEPT_ENCODING, ENCODING, !req.stream)
+        .header_if(CONTENT_ENCODING, ENCODING, !req.stream && req.compressed)
+        .header(AUTHORIZATION, req.ext_token.as_unext().format_bearer_token())
+        .header_if(CONNECT_ACCEPT_ENCODING, ENCODING, req.stream)
+        .header_if(CONNECT_CONTENT_ENCODING, ENCODING, req.stream)
         .header(CONNECT_PROTOCOL_VERSION, ONE)
-        .header(
-            CONTENT_TYPE,
-            if req.is_stream { CONNECT_PROTO } else { PROTO },
-        )
+        .header(CONTENT_TYPE, if req.stream { CONNECT_PROTO } else { PROTO })
         .header(COOKIE, req.cookie.unwrap_or(NONE))
         .header(USER_AGENT, CONNECT_ES)
-        .opt_header_map(AMZN_TRACE_ID, req.trace_id, |v| {
+        .header_map(AMZN_TRACE_ID, req.trace_id, |v| {
             const PREFIX: &[u8; 5] = b"Root=";
             unsafe {
-                ::core::ptr::copy_nonoverlapping(PREFIX.as_ptr(), buf.as_mut_ptr(), 5);
-                ::core::ptr::copy_nonoverlapping(v.as_ptr(), buf.as_mut_ptr().add(5), 36);
+                core::ptr::copy_nonoverlapping(PREFIX.as_ptr(), buf.as_mut_ptr(), 5);
+                core::ptr::copy_nonoverlapping(v.as_ptr(), buf.as_mut_ptr().add(5), 36);
+                http::HeaderValue::from_bytes(buf.get_unchecked(..41)).unwrap_unchecked()
             }
-            __unwrap!(http::HeaderValue::from_bytes(buf.get_unchecked(..41)))
         })
-        .header(
-            CLIENT_KEY,
-            __unwrap!(http::HeaderValue::from_bytes({
-                req.ext_token
-                    .client_key
-                    .to_str(&mut *(buf.as_mut_ptr() as *mut [u8; 64]));
+        .header(CLIENT_KEY, unsafe {
+            http::HeaderValue::from_bytes({
+                req.ext_token.client_key.to_str(&mut *(buf.as_mut_ptr() as *mut [u8; 64]));
                 buf.get_unchecked(..64)
-            })),
-        )
+            })
+            .unwrap_unchecked()
+        })
         .header(
             CURSOR_CHECKSUM,
             __unwrap!(http::HeaderValue::from_bytes({
@@ -203,60 +180,38 @@ pub fn build_client_request(req: AiServiceRequest) -> RequestBuilder {
         )
         .header(CURSOR_CLIENT_VERSION, cursor_client_version())
         .opt_header_map(CURSOR_CONFIG_VERSION, req.ext_token.config_version, |v| {
-            v.hyphenated()
-                .encode_lower(unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 36]) });
-            __unwrap!(http::HeaderValue::from_bytes(buf.get_unchecked(..36)))
+            v.hyphenated().encode_lower(unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 36]) });
+            unsafe { http::HeaderValue::from_bytes(buf.get_unchecked(..36)).unwrap_unchecked() }
         })
         .header(CURSOR_STREAMING, TRUE)
         .header(CURSOR_TIMEZONE, req.ext_token.timezone_name())
         .opt_header(FS_CLIENT_KEY, req.fs_client_key)
         .header(GHOST_MODE, TRUE)
         .header(NEW_ONBOARDING_COMPLETED, FALSE)
-        .opt_header_map(REQUEST_ID, req.trace_id, |v| {
-            __unwrap!(http::HeaderValue::from_bytes(&v))
-        })
+        .header_map(REQUEST_ID, req.trace_id, |v| __unwrap!(http::HeaderValue::from_bytes(&v)))
         .header(SESSION_ID, {
             req.ext_token
                 .session_id
                 .hyphenated()
                 .encode_lower(unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 36]) });
-            __unwrap!(http::HeaderValue::from_bytes(buf.get_unchecked(..36)))
+            unsafe { http::HeaderValue::from_bytes(buf.get_unchecked(..36)).unwrap_unchecked() }
         })
 }
 
-/// 返回预构建的获取 Stripe 账户信息的 Cursor API 客户端
-///
-/// # 参数
-///
-/// * `auth_token` - 授权令牌
-///
-/// # 返回
-///
-/// * `reqwest::RequestBuilder` - 配置好的请求构建器
-pub fn build_profile_request(client: &Client, auth_token: &str, is_pri: bool) -> RequestBuilder {
-    let (builder, host) = get_client_and_host(
-        client,
-        http::Method::GET,
-        stripe_url(is_pri),
-        is_pri,
-        CURSOR_API2_HOST,
-    );
+pub fn build_stripe_request(
+    client: &Client,
+    bearer_token: http::HeaderValue,
+    use_pri: bool,
+) -> RequestBuilder {
+    let (builder, host) =
+        get_client_and_host(client, Method::GET, stripe_url(use_pri), use_pri, CURSOR_API2_HOST);
 
     builder
         .version(http::Version::HTTP_2)
         .header(HOST, host)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(ACCEPT_ENCODING, ENCODINGS)
-        .header(AUTHORIZATION, {
-            let mut v = __unwrap!(http::HeaderValue::from_str(
-                &StringBuilder::with_capacity(2)
-                    .append(AUTHORIZATION_BEARER_PREFIX)
-                    .append(auth_token)
-                    .build()
-            ));
-            v.set_sensitive(true);
-            v
-        })
+        .header(AUTHORIZATION, bearer_token)
         .header(GHOST_MODE, TRUE)
         .header(NEW_ONBOARDING_COMPLETED, FALSE)
         .header(USER_AGENT, header_value_ua_cursor_latest())
@@ -276,32 +231,15 @@ pub fn build_profile_request(client: &Client, auth_token: &str, is_pri: bool) ->
     // .header(PRIORITY, U_EQ_0)
 }
 
-/// 返回预构建的获取使用情况的 Cursor API 客户端
-///
-/// # 参数
-///
-/// * `user_id` - 用户 ID
-/// * `auth_token` - 授权令牌
-///
-/// # 返回
-///
-/// * `reqwest::RequestBuilder` - 配置好的请求构建器
 pub fn build_usage_request(
     client: &Client,
-    user_id: &str,
-    auth_token: &str,
-    is_pri: bool,
+    cookie: http::HeaderValue,
+    use_pri: bool,
 ) -> RequestBuilder {
-    let (builder, host) = get_client_and_host(
-        client,
-        http::Method::GET,
-        usage_api_url(is_pri),
-        is_pri,
-        CURSOR_HOST,
-    );
+    let (builder, host) =
+        get_client_and_host(client, Method::GET, usage_api_url(use_pri), use_pri, CURSOR_HOST);
 
     builder
-        .version(http::Version::HTTP_11)
         .header(HOST, host)
         .header(USER_AGENT, UA)
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
@@ -310,84 +248,58 @@ pub fn build_usage_request(
         .header(REFERER, CURSOR_REFERER_URL)
         .header(DNT, ONE)
         .header(SEC_GPC, ONE)
+        .header(CONNECTION, KEEP_ALIVE)
+        .header(COOKIE, cookie)
         .header(SEC_FETCH_DEST, EMPTY)
         .header(SEC_FETCH_MODE, CORS)
         .header(SEC_FETCH_SITE, SAME_ORIGIN)
-        .header(CONNECTION, KEEP_ALIVE)
+        .header(PRIORITY, U_EQ_0)
         .header(PRAGMA, NO_CACHE)
         .header(CACHE_CONTROL, NO_CACHE)
-        .header(TE, TRAILERS)
-        .header(PRIORITY, U_EQ_0)
-        .header(
-            COOKIE,
-            format_workos_cursor_session_token(user_id, auth_token),
-        )
-        .query(&[("user", user_id)])
 }
 
-/// 返回预构建的获取用户信息的 Cursor API 客户端
-///
-/// # 参数
-///
-/// * `user_id` - 用户 ID
-/// * `auth_token` - 授权令牌
-///
-/// # 返回
-///
-/// * `reqwest::RequestBuilder` - 配置好的请求构建器
-pub fn build_userinfo_request(
-    client: &Client,
-    user_id: &str,
-    auth_token: &str,
-    is_pri: bool,
-) -> RequestBuilder {
-    let (builder, host) = get_client_and_host(
-        client,
-        http::Method::GET,
-        user_api_url(is_pri),
-        is_pri,
-        CURSOR_HOST,
-    );
+// pub fn build_userinfo_request(
+//     client: &Client,
+//     cookie: http::HeaderValue,
+//     use_pri: bool,
+// ) -> RequestBuilder {
+//     let (builder, host) = get_client_and_host(
+//         client,
+//         Method::POST,
+//         user_api_url(use_pri),
+//         use_pri,
+//         CURSOR_HOST,
+//     );
 
-    builder
-        .version(http::Version::HTTP_11)
-        .header(HOST, host)
-        .header(USER_AGENT, UA)
-        .header(ACCEPT, HEADER_VALUE_ACCEPT)
-        .header(ACCEPT_LANGUAGE, LANGUAGE)
-        .header(ACCEPT_ENCODING, ENCODINGS)
-        .header(REFERER, CURSOR_REFERER_URL)
-        .header(DNT, ONE)
-        .header(SEC_GPC, ONE)
-        .header(SEC_FETCH_DEST, EMPTY)
-        .header(SEC_FETCH_MODE, CORS)
-        .header(SEC_FETCH_SITE, SAME_ORIGIN)
-        .header(CONNECTION, KEEP_ALIVE)
-        .header(PRAGMA, NO_CACHE)
-        .header(CACHE_CONTROL, NO_CACHE)
-        .header(TE, TRAILERS)
-        .header(PRIORITY, U_EQ_0)
-        .header(
-            COOKIE,
-            format_workos_cursor_session_token(user_id, auth_token),
-        )
-}
+//     builder
+//         .header(HOST, host)
+//         .header(USER_AGENT, UA)
+//         .header(ACCEPT, HEADER_VALUE_ACCEPT)
+//         .header(ACCEPT_LANGUAGE, LANGUAGE)
+//         .header(ACCEPT_ENCODING, ENCODINGS)
+//         .header(REFERER, CURSOR_REFERER_URL)
+//         .header(DNT, ONE)
+//         .header(SEC_GPC, ONE)
+//         .header(CONNECTION, KEEP_ALIVE)
+//         .header(COOKIE, cookie)
+//         .header(SEC_FETCH_DEST, EMPTY)
+//         .header(SEC_FETCH_MODE, CORS)
+//         .header(SEC_FETCH_SITE, SAME_ORIGIN)
+//         .header(PRAGMA, NO_CACHE)
+//         .header(CACHE_CONTROL, NO_CACHE)
+//         .header(TE, TRAILERS)
+//         .header(PRIORITY, U_EQ_0)
+// }
 
 pub fn build_token_upgrade_request(
     client: &Client,
     uuid: &str,
     challenge: &str,
-    user_id: &str,
-    auth_token: &str,
-    is_pri: bool,
+    cookie: http::HeaderValue,
+    use_pri: bool,
 ) -> RequestBuilder {
-    let (builder, host) = get_client_and_host(
-        client,
-        http::Method::POST,
-        token_upgrade_url(is_pri),
-        is_pri,
-        CURSOR_HOST,
-    );
+    let (builder, host) =
+        get_client_and_host(client, Method::POST, token_upgrade_url(use_pri), use_pri, CURSOR_HOST);
 
     crate::define_typed_constants! {
         &'static str => {
@@ -425,7 +337,6 @@ pub fn build_token_upgrade_request(
     referer.push_str(REFERER_SUFFIX);
 
     builder
-        .version(http::Version::HTTP_11)
         .header(HOST, host)
         .header(USER_AGENT, UA)
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
@@ -436,18 +347,15 @@ pub fn build_token_upgrade_request(
         .header(CONTENT_LENGTH, body.len())
         .header(DNT, ONE)
         .header(SEC_GPC, ONE)
+        .header(CONNECTION, KEEP_ALIVE)
+        .header(COOKIE, cookie)
         .header(SEC_FETCH_DEST, EMPTY)
         .header(SEC_FETCH_MODE, CORS)
         .header(SEC_FETCH_SITE, SAME_ORIGIN)
-        .header(CONNECTION, KEEP_ALIVE)
         .header(PRAGMA, NO_CACHE)
         .header(CACHE_CONTROL, NO_CACHE)
         .header(TE, TRAILERS)
         .header(PRIORITY, U_EQ_0)
-        .header(
-            COOKIE,
-            format_workos_cursor_session_token(user_id, auth_token),
-        )
         .body(body)
 }
 
@@ -455,13 +363,13 @@ pub fn build_token_poll_request(
     client: &Client,
     uuid: &str,
     verifier: &str,
-    is_pri: bool,
+    use_pri: bool,
 ) -> RequestBuilder {
     let (builder, host) = get_client_and_host(
         client,
-        http::Method::GET,
-        token_poll_url(is_pri),
-        is_pri,
+        Method::GET,
+        token_poll_url(use_pri),
+        use_pri,
         CURSOR_API2_HOST,
     );
 
@@ -477,12 +385,16 @@ pub fn build_token_poll_request(
         .query(&[("uuid", uuid), ("verifier", verifier)])
 }
 
-pub fn build_token_refresh_request(client: &Client, is_pri: bool, body: Vec<u8>) -> RequestBuilder {
+pub fn build_token_refresh_request(
+    client: &Client,
+    use_pri: bool,
+    body: Vec<u8>,
+) -> RequestBuilder {
     let (builder, host) = get_client_and_host(
         client,
-        http::Method::POST,
-        token_refresh_url(is_pri),
-        is_pri,
+        Method::POST,
+        token_refresh_url(use_pri),
+        use_pri,
         CURSOR_API2_HOST,
     );
 
@@ -501,58 +413,46 @@ pub fn build_token_refresh_request(client: &Client, is_pri: bool, body: Vec<u8>)
 
 pub fn build_proto_web_request(
     client: &Client,
-    user_id: &str,
-    auth_token: &str,
-    url: fn(bool) -> &'static str,
-    is_pri: bool,
+    cookie: http::HeaderValue,
+    url: &'static str,
+    use_pri: bool,
     body: bytes::Bytes,
 ) -> RequestBuilder {
-    let (builder, host) =
-        get_client_and_host(client, http::Method::POST, url(is_pri), is_pri, CURSOR_HOST);
+    let (builder, host) = get_client_and_host(client, Method::POST, url, use_pri, CURSOR_HOST);
 
     builder
-        .version(http::Version::HTTP_11)
         .header(HOST, host)
         .header(USER_AGENT, UA)
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(ACCEPT_ENCODING, ENCODINGS)
+        .header(REFERER, CURSOR_REFERER_URL)
         .header(CONTENT_TYPE, JSON)
         .header(CONTENT_LENGTH, body.len())
-        .header(REFERER, CURSOR_REFERER_URL)
+        .header(ORIGIN, CURSOR_ORIGIN)
         .header(DNT, ONE)
         .header(SEC_GPC, ONE)
+        .header(CONNECTION, KEEP_ALIVE)
+        .header(COOKIE, cookie)
         .header(SEC_FETCH_DEST, EMPTY)
         .header(SEC_FETCH_MODE, CORS)
         .header(SEC_FETCH_SITE, SAME_ORIGIN)
-        .header(CONNECTION, KEEP_ALIVE)
         .header(PRIORITY, U_EQ_0)
         .header(PRAGMA, NO_CACHE)
         .header(CACHE_CONTROL, NO_CACHE)
         .header(TE, TRAILERS)
-        .header(
-            COOKIE,
-            format_workos_cursor_session_token(user_id, auth_token),
-        )
         .body(body)
 }
 
 pub fn build_sessions_request(
     client: &Client,
-    user_id: &str,
-    auth_token: &str,
-    is_pri: bool,
+    cookie: http::HeaderValue,
+    use_pri: bool,
 ) -> RequestBuilder {
-    let (builder, host) = get_client_and_host(
-        client,
-        http::Method::GET,
-        sessions_url(is_pri),
-        is_pri,
-        CURSOR_HOST,
-    );
+    let (builder, host) =
+        get_client_and_host(client, Method::GET, sessions_url(use_pri), use_pri, CURSOR_HOST);
 
     builder
-        .version(http::Version::HTTP_11)
         .header(HOST, host)
         .header(USER_AGENT, UA)
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
@@ -561,40 +461,13 @@ pub fn build_sessions_request(
         .header(REFERER, CURSOR_REFERER_URL)
         .header(DNT, ONE)
         .header(SEC_GPC, ONE)
+        .header(CONNECTION, KEEP_ALIVE)
+        .header(COOKIE, cookie)
         .header(SEC_FETCH_DEST, EMPTY)
         .header(SEC_FETCH_MODE, CORS)
         .header(SEC_FETCH_SITE, SAME_ORIGIN)
-        .header(CONNECTION, KEEP_ALIVE)
         .header(PRAGMA, NO_CACHE)
         .header(CACHE_CONTROL, NO_CACHE)
         .header(TE, TRAILERS)
         .header(PRIORITY, U_EQ_0)
-        .header(
-            COOKIE,
-            format_workos_cursor_session_token(user_id, auth_token),
-        )
-}
-
-#[inline]
-fn format_workos_cursor_session_token(user_id: &str, auth_token: &str) -> String {
-    crate::define_typed_constants! {
-        &'static str => {
-            TOKEN_PREFIX = "WorkosCursorSessionToken=",
-            SEPARATOR = "%3A%3A",
-        }
-        usize => {
-            USER_ID_LEN = 31,
-            PREFIX_AND_USER_ID_AND_SEPARATOR = TOKEN_PREFIX.len() + USER_ID_LEN + SEPARATOR.len(),
-        }
-    }
-
-    // 预分配足够的空间: TOKEN_PREFIX + user_id + SEPARATOR + auth_token
-    let mut result = String::with_capacity(PREFIX_AND_USER_ID_AND_SEPARATOR + auth_token.len());
-
-    result.push_str(TOKEN_PREFIX);
-    result.push_str(user_id);
-    result.push_str(SEPARATOR);
-    result.push_str(auth_token);
-
-    result
 }

@@ -2,10 +2,11 @@ use crate::{
     app::{
         constant::UNNAMED,
         model::{
-            Alias, AppState, Checksum, CommonResponse, ExtToken, GcppHost, Hash, RawToken, Token,
-            TokenError, TokenInfo, TokenManager, TokenUpdateRequest, TokensAddRequest,
-            TokensAliasSetRequest, TokensDeleteRequest, TokensDeleteResponse, TokensInfoResponse,
-            TokensProxySetRequest, TokensStatusSetRequest, TokensTimezoneSetRequest,
+            AppState, Checksum, CommonResponse, ExtToken, GcppHost, Hash, RawToken, Token,
+            TokenError, TokenHealth, TokenInfo, TokenManager, TokenStatus, TokensAddRequest,
+            TokensAddResponse, TokensAliasSetRequest, TokensDeleteRequest, TokensDeleteResponse,
+            TokensGetResponse, TokensMergeRequest, TokensProxySetRequest, TokensStatusSetRequest,
+            TokensTimezoneSetRequest, TokensUpdateRequest,
         },
     },
     common::{
@@ -13,9 +14,12 @@ use crate::{
         utils::string_builder::StringBuilder,
     },
 };
-use ahash::HashSet;
+use alloc::{borrow::Cow, sync::Arc};
 use axum::{Json, extract::State, http::StatusCode};
-use std::{borrow::Cow, str::FromStr as _, sync::Arc};
+use core::str::FromStr as _;
+use interned::ArcStr;
+
+type HashSet<K> = hashbrown::HashSet<K, ahash::RandomState>;
 
 crate::define_typed_constants! {
     &'static str => {
@@ -41,22 +45,16 @@ crate::define_typed_constants! {
     }
 }
 
-pub async fn handle_get_tokens(State(state): State<Arc<AppState>>) -> Json<TokensInfoResponse> {
+pub async fn handle_get_tokens(State(state): State<Arc<AppState>>) -> Json<TokensGetResponse> {
     let tokens: Vec<_> = state.token_manager_read().await.list();
-    let tokens_count = tokens.len();
 
-    Json(TokensInfoResponse {
-        status: ApiStatus::Success,
-        tokens: Some(tokens),
-        tokens_count,
-        message: None,
-    })
+    Json(TokensGetResponse { tokens })
 }
 
 pub async fn handle_set_tokens(
     State(state): State<Arc<AppState>>,
-    Json(tokens): Json<TokenUpdateRequest>,
-) -> Result<Json<TokensInfoResponse>, StatusCode> {
+    Json(tokens): Json<TokensUpdateRequest>,
+) -> Result<Json<TokensAddResponse>, StatusCode> {
     // 获取写锁并更新token manager
     let mut token_manager = state.token_manager_write().await;
     *token_manager = TokenManager::new(tokens.len());
@@ -66,23 +64,18 @@ pub async fn handle_set_tokens(
     let tokens_count = token_manager.tokens().len();
 
     // 保存到文件
-    token_manager
-        .save()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    token_manager.save().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(TokensInfoResponse {
-        status: ApiStatus::Success,
-        tokens: None,
+    Ok(Json(TokensAddResponse {
         tokens_count,
-        message: Some(Cow::Borrowed("Token files have been updated and reloaded")),
+        message: "Token files have been updated and reloaded",
     }))
 }
 
 pub async fn handle_add_tokens(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TokensAddRequest>,
-) -> Result<Json<TokensInfoResponse>, (StatusCode, Json<GenericError>)> {
+) -> Result<Json<TokensAddResponse>, (StatusCode, Json<GenericError>)> {
     // 获取token manager的写锁
     let mut token_manager = state.token_manager_write().await;
 
@@ -121,14 +114,15 @@ pub async fn handle_add_tokens(
                         config_version: token_info
                             .config_version
                             .and_then(|s| uuid::Uuid::parse_str(&s).ok()),
-                        proxy: token_info.proxy,
+                        proxy: token_info.proxy.map(ArcStr::new),
                         timezone: token_info
                             .timezone
                             .and_then(|s| chrono_tz::Tz::from_str(&s).ok()),
                         gcpp_host: token_info.gcpp_host.and_then(|s| GcppHost::from_str(&s)),
-                        user: None,
                     },
-                    status: request.status,
+                    status: TokenStatus { enabled: request.enabled, health: TokenHealth::new() },
+                    usage: None,
+                    user: None,
                     stripe: None,
                     sessions: vec![],
                 },
@@ -162,22 +156,15 @@ pub async fn handle_add_tokens(
             )
         })?;
 
-        Ok(Json(TokensInfoResponse {
-            status: ApiStatus::Success,
-            tokens: None,
+        Ok(Json(TokensAddResponse {
             tokens_count,
-            message: Some(Cow::Borrowed("New tokens have been added and reloaded")),
+            message: "New tokens have been added and reloaded",
         }))
     } else {
         // 如果没有新tokens，返回当前状态
         let tokens_count = token_manager.tokens().len();
 
-        Ok(Json(TokensInfoResponse {
-            status: ApiStatus::Success,
-            tokens: None,
-            tokens_count,
-            message: Some(Cow::Borrowed("No new tokens were added")),
-        }))
+        Ok(Json(TokensAddResponse { tokens_count, message: "No new tokens were added" }))
     }
 }
 
@@ -190,11 +177,7 @@ pub async fn handle_delete_tokens(
     // 一次遍历完成删除和失败记录
     let (has_updates, failed_tokens) = {
         let mut has_updates = false;
-        let mut failed_tokens = if request.include_failed_tokens {
-            Some(Vec::new())
-        } else {
-            None
-        };
+        let mut failed_tokens = if request.include_failed_tokens { Some(Vec::new()) } else { None };
 
         for alias in request.aliases {
             match token_manager.alias_map().get(alias.as_str()) {
@@ -202,10 +185,11 @@ pub async fn handle_delete_tokens(
                     let _ = token_manager.remove(id);
                     has_updates = true;
                 }
-                None =>
+                None => {
                     if let Some(ref mut failed) = failed_tokens {
                         failed.push(alias);
-                    },
+                    }
+                }
             }
         }
 
@@ -227,10 +211,7 @@ pub async fn handle_delete_tokens(
         })?;
     }
 
-    Ok(Json(TokensDeleteResponse {
-        status: ApiStatus::Success,
-        failed_tokens,
-    }))
+    Ok(Json(TokensDeleteResponse { status: ApiStatus::Success, failed_tokens }))
 }
 
 pub async fn handle_update_tokens_profile(
@@ -261,42 +242,41 @@ pub async fn handle_update_tokens_profile(
 
     for alias in &aliases {
         // 验证token是否在token_manager中存在
-        if let Some(id) = token_manager.alias_map().get(alias.as_str()).copied()
-            && let alias_is_unnamed = unsafe {
+        if let Some(id) = token_manager.alias_map().get(alias.as_str()).copied() {
+            let alias_is_unnamed = unsafe {
                 token_manager
                     .id_to_alias()
                     .get_unchecked(id)
                     .as_ref()
-                    .map(Alias::is_unnamed)
-                    .unwrap_or(false)
-            }
-            && let Some(token_info) = token_manager
-                .tokens_mut()
-                .get_mut(id)
-                .and_then(|t| t.as_mut())
-        {
+                    .unwrap_unchecked()
+                    .is_unnamed()
+            };
+            let token_info = unsafe { token_manager.tokens_mut().get_unchecked_mut(id) };
+
             // 获取profile
-            let (user, stripe, sessions) = crate::common::utils::get_token_profile(
+            let (usage, stripe, user, sessions) = crate::common::utils::get_token_profile(
                 token_info.bundle.get_client(),
-                &token_info.bundle.primary_token,
-                token_info.bundle.secondary_token.as_ref(),
-                true,
+                token_info.bundle.as_unext(),
                 true,
                 true,
             )
             .await;
 
             // 设置profile
-            if alias_is_unnamed && let Some(ref user) = user {
+            if alias_is_unnamed
+                && let Some(ref user) = user
+                && let Some(alias) = user.alias()
+            {
                 // Safety: capacity == aliases.len && token_info.len <= aliases.len
                 unsafe {
                     let len = alias_updaters.len();
                     let end = alias_updaters.as_mut_ptr().add(len);
-                    std::ptr::write(end, (id, user.email.clone()));
+                    ::core::ptr::write(end, (id, alias.clone()));
                     alias_updaters.set_len(len + 1);
                 }
             }
-            token_info.bundle.user = user;
+            token_info.usage = usage;
+            token_info.user = user;
             token_info.stripe = stripe;
             if let Some(sessions) = sessions {
                 token_info.sessions = sessions;
@@ -365,12 +345,7 @@ pub async fn handle_update_tokens_config_version(
             .alias_map()
             .get(alias.as_str())
             .copied()
-            .and_then(|id| {
-                token_manager
-                    .tokens_mut()
-                    .get_mut(id)
-                    .and_then(|t| t.as_mut())
-            })
+            .map(|id| unsafe { token_manager.tokens_mut().get_unchecked_mut(id) })
         {
             if info.bundle.primary_token.is_web() {
                 short_token_count += 1;
@@ -425,10 +400,7 @@ pub async fn handle_update_tokens_config_version(
         message_builder.append(UPDATE_FAILURE_COUNT).build()
     };
 
-    Ok(Json(CommonResponse {
-        status: ApiStatus::Success,
-        message: Cow::Owned(message),
-    }))
+    Ok(Json(CommonResponse { status: ApiStatus::Success, message: Cow::Owned(message) }))
 }
 
 pub async fn handle_refresh_tokens(
@@ -453,22 +425,14 @@ pub async fn handle_refresh_tokens(
     let mut failed_count: u32 = 0;
 
     for alias in aliases {
-        if let Some(info) = token_manager
+        if let Some(writer) = token_manager
             .alias_map()
             .get(alias.as_str())
             .copied()
-            .and_then(|id| {
-                token_manager
-                    .tokens_mut()
-                    .get_mut(id)
-                    .and_then(|t| t.as_mut())
-            })
+            .map(|id| unsafe { token_manager.tokens_mut().into_token_writer(id) })
+            && crate::common::utils::get_new_token(writer, true).await
         {
-            if crate::common::utils::get_new_token(&mut info.bundle, true).await {
-                updated_count += 1;
-            } else {
-                failed_count += 1;
-            }
+            updated_count += 1;
         } else {
             failed_count += 1;
         }
@@ -531,12 +495,7 @@ pub async fn handle_set_tokens_status(
             .alias_map()
             .get(alias.as_str())
             .copied()
-            .and_then(|id| {
-                token_manager
-                    .tokens_mut()
-                    .get_mut(id)
-                    .and_then(|t| t.as_mut())
-            })
+            .map(|id| unsafe { token_manager.tokens_mut().get_unchecked_mut(id) })
         {
             info.status = request.status;
             updated_count += 1;
@@ -676,12 +635,7 @@ pub async fn handle_set_tokens_proxy(
             .alias_map()
             .get(alias.as_str())
             .copied()
-            .and_then(|id| {
-                token_manager
-                    .tokens_mut()
-                    .get_mut(id)
-                    .and_then(|t| t.as_mut())
-            })
+            .map(|id| unsafe { token_manager.tokens_mut().get_unchecked_mut(id) })
         {
             info.bundle.proxy = request.proxy.clone();
             updated_count += 1;
@@ -747,12 +701,7 @@ pub async fn handle_set_tokens_timezone(
             .alias_map()
             .get(alias.as_str())
             .copied()
-            .and_then(|id| {
-                token_manager
-                    .tokens_mut()
-                    .get_mut(id)
-                    .and_then(|t| t.as_mut())
-            })
+            .map(|id| unsafe { token_manager.tokens_mut().get_unchecked_mut(id) })
         {
             info.bundle.timezone = request.timezone;
             updated_count += 1;
@@ -783,6 +732,100 @@ pub async fn handle_set_tokens_timezone(
                 .append("个令牌时区, ")
                 .append(failed_count.to_string())
                 .append(SET_FAILURE_COUNT)
+                .build(),
+        ),
+    }))
+}
+
+pub async fn handle_merge_tokens(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TokensMergeRequest>,
+) -> Result<Json<CommonResponse>, (StatusCode, Json<GenericError>)> {
+    // 验证请求
+    if request.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(GenericError {
+                status: ApiStatus::Error,
+                code: None,
+                error: Some(Cow::Borrowed(ERROR_NO_TOKENS_PROVIDED)),
+                message: Some(Cow::Borrowed(MESSAGE_NO_TOKENS_PROVIDED)),
+            }),
+        ));
+    }
+
+    // 获取token manager的写锁
+    let mut token_manager = state.token_manager_write().await;
+
+    // 应用merge
+    let mut updated_count: u32 = 0;
+    let mut failed_count: u32 = 0;
+
+    for (alias, token_info) in request {
+        // 验证token是否在token_manager中存在
+        if token_info.has_some()
+            && let Some(mut writer) = token_manager
+                .alias_map()
+                .get(alias.as_str())
+                .copied()
+                .map(|id| unsafe { token_manager.tokens_mut().into_token_writer(id) })
+        {
+            let bundle = &mut **writer;
+            if let Some(token) = token_info.primary_token {
+                bundle.primary_token = token;
+            }
+            if let Some(token) = token_info.secondary_token {
+                bundle.secondary_token = Some(token);
+            }
+            if let Some(checksum) = token_info.checksum {
+                bundle.checksum = checksum;
+            }
+            if let Some(client_key) = token_info.client_key {
+                bundle.client_key = client_key;
+            }
+            if let Some(config_version) = token_info.config_version {
+                bundle.config_version = Some(config_version);
+            }
+            if let Some(session_id) = token_info.session_id {
+                bundle.session_id = session_id;
+            }
+            if let Some(proxy) = token_info.proxy {
+                bundle.proxy = Some(proxy);
+            }
+            if let Some(timezone) = token_info.timezone {
+                bundle.timezone = Some(timezone);
+            }
+            if let Some(gcpp_host) = token_info.gcpp_host {
+                bundle.gcpp_host = Some(gcpp_host);
+            }
+            updated_count += 1;
+        } else {
+            failed_count += 1;
+        }
+    }
+
+    // 保存更改
+    if updated_count > 0 && token_manager.save().await.is_err() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(GenericError {
+                status: ApiStatus::Error,
+                code: None,
+                error: Some(Cow::Borrowed(ERROR_SAVE_TOKENS)),
+                message: Some(Cow::Borrowed(MESSAGE_SAVE_TOKEN_DATA_FAILED)),
+            }),
+        ));
+    }
+
+    Ok(Json(CommonResponse {
+        status: ApiStatus::Success,
+        message: Cow::Owned(
+            StringBuilder::with_capacity(5)
+                .append("已合并")
+                .append(updated_count.to_string())
+                .append("个令牌, ")
+                .append(failed_count.to_string())
+                .append("个令牌合并失败")
                 .build(),
         ),
     }))

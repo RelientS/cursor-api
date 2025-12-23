@@ -12,7 +12,7 @@ impl StatusCode {
     }
 
     #[inline]
-    pub const fn as_http(self) -> ::http::StatusCode { unsafe { ::core::mem::transmute(self) } }
+    pub const fn as_http(self) -> ::http::StatusCode { unsafe { ::core::intrinsics::transmute(self) } }
 }
 
 impl ::core::fmt::Display for StatusCode {

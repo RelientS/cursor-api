@@ -1,10 +1,12 @@
 mod canonical;
+mod cpp;
 mod cursor;
 
 pub use canonical::CanonicalError;
+pub use cpp::CppError;
 pub use cursor::CursorError;
 
-// use std::borrow::Cow;
+// use alloc::borrow::Cow;
 
 // use super::aiserver::v1::ErrorDetails;
 // use crate::{
@@ -12,10 +14,10 @@ pub use cursor::CursorError;
 //     common::model::{ApiStatus, ErrorResponse as CommonErrorResponse},
 //     core::{error::cursor::CursorError, model::anthropic},
 // };
-// use ::base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
-// use ::prost::Message as _;
-// use ::http::StatusCode;
-// use ::serde::{Deserialize, Serialize};
+// use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+// use prost::Message as _;
+// use http::StatusCode;
+// use serde::{Deserialize, Serialize};
 
 // #[derive(Deserialize)]
 // pub struct ChatError {
@@ -223,9 +225,9 @@ pub use cursor::CursorError;
 //     }
 // }
 
+#[derive(Debug)]
 pub enum StreamError {
     Upstream(CursorError),
-    DataLengthLessThan5,
     EmptyStream,
 }
 
@@ -234,7 +236,6 @@ impl ::core::fmt::Display for StreamError {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         match self {
             Self::Upstream(error) => f.write_str(error.code()),
-            Self::DataLengthLessThan5 => f.write_str("data length less than 5"),
             Self::EmptyStream => f.write_str("empty stream"),
         }
     }

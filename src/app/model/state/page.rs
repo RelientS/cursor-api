@@ -1,22 +1,16 @@
-use axum::{body::Body, response::Response};
-use http::{
-    StatusCode,
-    header::{CONTENT_TYPE, LOCATION},
-};
+use axum::body::Body;
+use axum::response::Response;
+use http::StatusCode;
+use http::header::{CONTENT_TYPE, LOCATION};
 
 use crate::app::constant::{
-    HEADER_VALUE_TEXT_CSS_UTF8, HEADER_VALUE_TEXT_HTML_UTF8, HEADER_VALUE_TEXT_JS_UTF8,
+    HEADER_VALUE_TEXT_CSS_UTF8, HEADER_VALUE_TEXT_HTML_UTF8, HEADER_VALUE_APPLICATION_JS_UTF8,
     HEADER_VALUE_TEXT_PLAIN_UTF8,
 };
 
 // 页面内容类型枚举
 #[derive(
-    Clone,
-    ::serde::Serialize,
-    ::serde::Deserialize,
-    ::rkyv::Archive,
-    ::rkyv::Deserialize,
-    ::rkyv::Serialize,
+    Clone, serde::Serialize, serde::Deserialize, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize,
 )]
 #[serde(tag = "type", content = "value")]
 #[serde(rename_all = "snake_case")]
@@ -32,7 +26,9 @@ pub enum PageContent {
 
 impl const Default for PageContent {
     #[inline(always)]
-    fn default() -> Self { Self::Default }
+    fn default() -> Self {
+        Self::Default
+    }
 }
 
 impl PageContent {
@@ -61,13 +57,13 @@ impl PageContent {
                 .header(CONTENT_TYPE, HEADER_VALUE_TEXT_CSS_UTF8)
                 .body(Body::from(content)),
             PageContent::Js(content) => Response::builder()
-                .header(CONTENT_TYPE, HEADER_VALUE_TEXT_JS_UTF8)
+                .header(CONTENT_TYPE, HEADER_VALUE_APPLICATION_JS_UTF8)
                 .body(Body::from(content)),
         })
     }
 }
 
-#[derive(Clone, Default, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize)]
+#[derive(Clone, Default, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub struct Pages {
     pub root_content: PageContent,
     pub logs_content: PageContent,

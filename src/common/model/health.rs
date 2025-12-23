@@ -1,7 +1,6 @@
 use serde::Serialize;
 
 use crate::app::model::DateTime;
-
 use super::ApiStatus;
 
 #[derive(Serialize)]
@@ -9,7 +8,7 @@ pub struct HealthCheckResponse {
     pub status: ApiStatus,
     pub service: ServiceInfo,
     pub runtime: RuntimeStats,
-    pub system: SystemStats,
+    pub system: Option<SystemStats>,
     pub capabilities: Capabilities,
 }
 
@@ -55,7 +54,7 @@ pub struct SystemStats {
 pub struct MemoryInfo {
     pub used_bytes: u64,
     pub used_percentage: f32,
-    pub available_bytes: Option<u64>,
+    pub available_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -66,7 +65,7 @@ pub struct CpuInfo {
 
 #[derive(Serialize)]
 pub struct Capabilities {
-    pub models: std::sync::Arc<Vec<&'static str>>,
+    pub models: alloc::sync::Arc<Vec<&'static str>>,
     pub endpoints: &'static [&'static str],
     pub features: &'static [&'static str],
 }

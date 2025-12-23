@@ -1,4 +1,6 @@
-#[derive(PartialEq, Clone, Copy, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize,
+)]
 #[repr(transparent)]
 pub struct PaymentId([u8; 14]);
 
@@ -8,13 +10,14 @@ impl PaymentId {
         let bytes = suffix.as_bytes();
 
         match bytes.try_into() {
-            Ok(array) =>
+            Ok(array) => {
                 if bytes.iter().all(|&c| is_alphanumeric(c)) {
                     Some(Self(array))
                 } else {
                     crate::debug!("{suffix:?} 包含非字母数字字符");
                     None
-                },
+                }
+            }
             Err(_) => {
                 crate::debug!("{suffix:?} length is {} but expected 14", suffix.len());
                 None
@@ -38,26 +41,30 @@ fn is_alphanumeric(c: u8) -> bool {
     c.is_ascii_uppercase() || c.is_ascii_lowercase() || c.is_ascii_digit()
 }
 
-impl ::core::fmt::Display for PaymentId {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+impl core::fmt::Debug for PaymentId {
+    #[inline]
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { self.as_str().fmt(f) }
+}
+
+impl core::fmt::Display for PaymentId {
+    #[inline]
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(f, "cus_{}", self.as_str())
     }
 }
 
-impl ::serde::Serialize for PaymentId {
+impl serde::Serialize for PaymentId {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
+    where S: ::serde::Serializer {
         serializer.collect_str(self)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for PaymentId {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         Self::new(&s)
             .ok_or_else(|| ::serde::de::Error::custom(format_args!("unknown payment id: {s}")))

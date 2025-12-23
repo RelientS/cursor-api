@@ -1,29 +1,27 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use ::ahash::HashSet;
-use ::core::borrow::Borrow;
-use ::parking_lot::Mutex;
+// pub(crate) mod arc;
 
-pub(crate) mod arc;
-pub(crate) mod manually_init;
-pub use arc::ArcStr;
-
-use crate::{app::constant::EMPTY_STRING, leak::manually_init::ManuallyInit};
+use crate::app::constant::EMPTY_STRING;
+use core::borrow::Borrow;
+use hashbrown::HashSet;
+use manually_init::ManuallyInit;
+use parking_lot::Mutex;
 
 // 全局实例
 static STATIC_POOL: ManuallyInit<Mutex<StaticPool>> = ManuallyInit::new();
 
 #[forbid(unused)]
-pub unsafe fn init_pool() {
-    STATIC_POOL.init(Mutex::new(StaticPool::default()));
-    arc::__init();
+pub fn init_pool() {
+    STATIC_POOL.init(Default::default());
+    interned::init();
 }
 
 // 静态字符串池
 #[derive(Default)]
 #[repr(transparent)]
 struct StaticPool {
-    pool: HashSet<&'static str>,
+    pool: HashSet<&'static str, ahash::RandomState>,
 }
 
 impl StaticPool {
@@ -42,11 +40,11 @@ impl StaticPool {
         let layout = __unwrap!(::core::alloc::Layout::array::<u8>(len));
 
         // 分配内存
-        let ptr = ::std::alloc::alloc(layout);
+        let ptr = alloc::alloc::alloc(layout);
         if ptr.is_null() {
             // 内存分配失败
             __cold_path!();
-            ::std::alloc::handle_alloc_error(layout);
+            alloc::alloc::handle_alloc_error(layout);
         }
 
         // 复制字符串内容
@@ -70,13 +68,13 @@ impl StaticPool {
 
 // 公共API
 pub fn intern_static<S: Borrow<str>>(s: S) -> &'static str {
-    unsafe { STATIC_POOL.get().lock().intern(s.borrow()) }
+    STATIC_POOL.get().lock().intern(s.borrow())
 }
 
-/// 创建带自动注销功能的Arc字符串
-///
-/// 这个函数使用自定义的ArcStr类型，具有以下优势：
-/// - 自动引用计数管理
-/// - 当引用计数为0时自动从池中移除
-/// - 完全的线程安全
-pub fn intern_arc<S: Borrow<str>>(s: S) -> ArcStr { ArcStr::new(s.borrow()) }
+// /// 创建带自动注销功能的Arc字符串
+// ///
+// /// 这个函数使用自定义的ArcStr类型，具有以下优势：
+// /// - 自动引用计数管理
+// /// - 当引用计数为0时自动从池中移除
+// /// - 完全的线程安全
+// pub fn intern_arc<S: Borrow<str>>(s: S) -> ArcStr { ArcStr::new(s.borrow()) }

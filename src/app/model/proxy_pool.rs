@@ -1,158 +1,159 @@
-use crate::app::lazy::{PROXIES_FILE_PATH, SERVICE_TIMEOUT, TCP_KEEPALIVE};
-use ahash::{HashMap, HashSet};
+use core::str::FromStr;
+use core::time::Duration;
+use alloc::sync::Arc;
+
 use arc_swap::{ArcSwap, ArcSwapAny};
 use memmap2::{MmapMut, MmapOptions};
 use reqwest::Client;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use std::{
-    str::FromStr,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
 use tokio::fs::OpenOptions;
+use manually_init::ManuallyInit;
+
+use crate::app::lazy::{PROXIES_FILE_PATH, SERVICE_TIMEOUT, TCP_KEEPALIVE};
 mod proxy_url;
 use proxy_url::ProxyUrl;
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
+type HashSet<K> = hashbrown::HashSet<K, ahash::RandomState>;
 
 // 代理值常量
 const NON_PROXY: &str = "non";
 const SYS_PROXY: &str = "sys";
 
-// 代理相关错误消息常量
-const PROXY_NOT_FOUND_IN_LIST: &str = "General proxy not found in proxy list";
-const PROXY_CLIENT_NOT_FOUND_IN_POOL: &str = "Client for general proxy not found in client pool";
-
+/// 创建默认的代理配置
+///
+/// 包含一个系统代理配置
 #[inline]
 pub fn default_proxies() -> HashMap<String, SingleProxy> {
     HashMap::from_iter([(SYS_PROXY.to_string(), SingleProxy::Sys)])
 }
 
 /// 名称到代理配置的映射
-static PROXIES: OnceLock<ArcSwap<HashMap<String, SingleProxy>>> = OnceLock::new();
+static PROXIES: ManuallyInit<ArcSwap<HashMap<String, SingleProxy>>> = ManuallyInit::new();
 
-/// 通用名称
-static GENERAL_NAME: OnceLock<ArcSwap<String>> = OnceLock::new();
+/// 通用代理名称
+static GENERAL_NAME: ManuallyInit<ArcSwap<String>> = ManuallyInit::new();
 
 /// 代理配置到客户端实例的映射
 ///
-/// 避免重复创建相同配置的客户端
-static CLIENTS: OnceLock<ArcSwap<HashMap<SingleProxy, Client>>> = OnceLock::new();
+/// 缓存已创建的客户端，避免重复创建相同配置的客户端
+static CLIENTS: ManuallyInit<ArcSwap<HashMap<SingleProxy, Client>>> = ManuallyInit::new();
 
 /// 通用客户端
 ///
-/// 用于未指定特定代理的请求
-static GENERAL_CLIENT: OnceLock<ArcSwapAny<Client>> = OnceLock::new();
+/// 用于未指定特定代理的请求，指向 GENERAL_NAME 对应的客户端
+static GENERAL_CLIENT: ManuallyInit<ArcSwapAny<Client>> = ManuallyInit::new();
 
+/// 代理配置管理器
+///
+/// 负责管理所有代理配置及其对应的客户端
 #[derive(Clone, Deserialize, Serialize, Archive, RkyvDeserialize, RkyvSerialize)]
 pub struct Proxies {
     /// 名称到代理配置的映射
     proxies: HashMap<String, SingleProxy>,
-    /// 通用名称
+    /// 默认使用的代理名称
     general: String,
 }
 
 impl Default for Proxies {
-    fn default() -> Self {
-        Self {
-            proxies: HashMap::from_iter([(SYS_PROXY.to_string(), SingleProxy::Sys)]),
-            general: SYS_PROXY.to_string(),
-        }
-    }
+    fn default() -> Self { Self { proxies: default_proxies(), general: SYS_PROXY.to_string() } }
 }
 
 impl Proxies {
+    /// 初始化全局代理系统
+    ///
+    /// 验证配置的完整性并创建所有必要的客户端
     #[inline]
     pub fn init(mut self) {
+        // 确保至少有默认代理
         if self.proxies.is_empty() {
-            self.proxies = HashMap::from_iter([(SYS_PROXY.to_string(), SingleProxy::Sys)]);
+            self.proxies = default_proxies();
             if self.general.as_str() != SYS_PROXY {
                 self.general = SYS_PROXY.to_string();
             }
         } else if !self.proxies.contains_key(&self.general) {
+            // 通用代理名称无效，使用第一个可用的代理
             self.general = __unwrap!(self.proxies.keys().next()).clone();
         }
+
+        // 收集所有唯一的代理配置
         let proxies = self.proxies.values().collect::<HashSet<_>>();
         let mut clients =
             HashMap::with_capacity_and_hasher(proxies.len(), ::ahash::RandomState::new());
+
+        // 为每个代理配置创建客户端
         for proxy in proxies {
             proxy.insert_to(&mut clients);
         }
-        let _ = GENERAL_CLIENT.set(ArcSwapAny::from(
-            clients
-                .get(
-                    self.proxies
-                        .get(&self.general)
-                        .expect(PROXY_NOT_FOUND_IN_LIST),
-                )
-                .expect(PROXY_CLIENT_NOT_FOUND_IN_POOL)
-                .clone(),
+
+        // 初始化全局静态变量
+        // Safety: 前面的逻辑已确保 general 存在于 proxies 中，
+        // 且所有 proxies 中的代理都有对应的客户端
+        GENERAL_CLIENT.init(ArcSwapAny::from(
+            __unwrap!(clients.get(__unwrap!(self.proxies.get(&self.general)))).clone(),
         ));
-        let _ = CLIENTS.set(ArcSwap::from_pointee(clients));
-        let _ = PROXIES.set(ArcSwap::from_pointee(self.proxies));
-        let _ = GENERAL_NAME.set(ArcSwap::from_pointee(self.general));
+        CLIENTS.init(ArcSwap::from_pointee(clients));
+        PROXIES.init(ArcSwap::from_pointee(self.proxies));
+        GENERAL_NAME.init(ArcSwap::from_pointee(self.general));
     }
 
+    /// 更新全局代理配置（不更新客户端池）
     #[inline]
     pub fn update_global(self) {
         proxies().store(Arc::new(self.proxies));
         general_name().store(Arc::new(self.general));
     }
 
-    // 更新全局代理池
-    fn update_global_pool() -> Result<(), Box<dyn std::error::Error>> {
+    /// 更新全局代理池
+    ///
+    /// 智能更新客户端池：
+    /// - 移除不再使用的客户端
+    /// - 为新的代理配置创建客户端
+    /// - 保留仍在使用的客户端
+    fn update_global_pool() {
         let proxies = proxies().load();
         let mut general_name = general_name().load_full();
         let mut clients = (*clients().load_full()).clone();
 
-        // 确保self.proxies至少有系统代理，且general有效
+        // 确保配置有效性
         if proxies.is_empty() {
-            self::proxies().store(Arc::new(HashMap::from_iter([(
-                SYS_PROXY.to_string(),
-                SingleProxy::Sys,
-            )])));
+            self::proxies().store(Arc::new(default_proxies()));
             if general_name.as_str() != SYS_PROXY {
                 general_name = Arc::new(SYS_PROXY.to_string());
             }
         } else if !proxies.contains_key(&*general_name) {
-            // general指向的代理不存在，更新为某个存在的代理
+            // 通用代理名称无效，选择第一个可用的
             general_name = Arc::new(__unwrap!(proxies.keys().next()).clone());
         }
 
-        // 1. 收集当前配置中的所有唯一代理
+        // 收集当前配置中的所有唯一代理
         let current_proxies: HashSet<&SingleProxy> = proxies.values().collect();
 
-        // 2. 首先移除不再使用的客户端
-        let to_remove: Vec<SingleProxy> = clients
-            .keys()
-            .filter(|proxy| !current_proxies.contains(proxy))
-            .cloned()
-            .collect();
+        // 移除不再使用的客户端
+        let to_remove: Vec<SingleProxy> =
+            clients.keys().filter(|proxy| !current_proxies.contains(proxy)).cloned().collect();
 
         for proxy in to_remove {
             clients.remove(&proxy);
         }
 
-        // 3. 然后为新的代理配置创建客户端
+        // 为新的代理配置创建客户端
         for proxy in current_proxies {
             if !clients.contains_key(proxy) {
-                // 创建新的客户端
                 proxy.insert_to(&mut clients);
             }
         }
 
+        // 更新全局状态
         self::clients().store(Arc::new(clients));
-
-        // 4. 设置通用名称
         self::general_name().store(general_name);
-
-        // 5. 设置通用客户端
         set_general();
-
-        Ok(())
     }
 
-    pub async fn save() -> Result<(), Box<dyn std::error::Error>> {
-        let bytes = ::rkyv::to_bytes::<::rkyv::rancor::Error>(&Self {
+    /// 保存代理配置到文件
+    pub async fn save() -> Result<(), Box<dyn core::error::Error + Send + Sync + 'static>> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&Self {
             proxies: (*proxies().load_full()).clone(),
             general: (*general_name().load_full()).clone(),
         })?;
@@ -165,6 +166,7 @@ impl Proxies {
             .open(&*PROXIES_FILE_PATH)
             .await?;
 
+        // 防止文件过大
         if bytes.len() > usize::MAX >> 1 {
             return Err("代理数据过大".into());
         }
@@ -177,12 +179,9 @@ impl Proxies {
         Ok(())
     }
 
-    pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let file = match OpenOptions::new()
-            .read(true)
-            .open(&*PROXIES_FILE_PATH)
-            .await
-        {
+    /// 从文件加载代理配置
+    pub async fn load() -> Result<Self, Box<dyn core::error::Error + Send + Sync + 'static>> {
+        let file = match OpenOptions::new().read(true).open(&*PROXIES_FILE_PATH).await {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
@@ -195,79 +194,68 @@ impl Proxies {
         }
 
         let mmap = unsafe { MmapOptions::new().map(&file)? };
+
+        // Safety: 文件内容由我们自己控制，格式保证正确
         unsafe {
             ::rkyv::from_bytes_unchecked::<Self, ::rkyv::rancor::Error>(&mmap).map_err(Into::into)
         }
     }
 
-    // 更新全局代理池并保存配置
+    /// 更新全局代理池并保存配置
     #[inline]
-    pub async fn update_and_save() -> Result<(), Box<dyn std::error::Error>> {
-        // 更新全局代理池
-        Self::update_global_pool()?;
-
-        // 保存配置到文件
+    pub async fn update_and_save() -> Result<(), Box<dyn core::error::Error + Send + Sync + 'static>>
+    {
+        Self::update_global_pool();
         Self::save().await
     }
 }
 
+/// 单个代理配置
 #[derive(Clone, Archive, RkyvDeserialize, RkyvSerialize, PartialEq, Eq, Hash)]
 #[rkyv(compare(PartialEq))]
 pub enum SingleProxy {
+    /// 不使用代理
     Non,
+    /// 使用系统代理
     Sys,
+    /// 使用指定URL的代理
     Url(ProxyUrl),
 }
 
 impl SingleProxy {
+    /// 根据代理配置创建对应的客户端并插入到映射中
     #[inline]
     fn insert_to(&self, clients: &mut HashMap<SingleProxy, Client>) {
-        // 创建新的客户端
-        match self {
-            SingleProxy::Non => {
-                clients.insert(
-                    SingleProxy::Non,
-                    Client::builder()
-                        .https_only(true)
-                        .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
-                        .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
-                        .no_proxy()
-                        .build()
-                        .expect("创建无代理客户端失败"),
-                );
-            }
-            SingleProxy::Sys => {
-                clients.insert(
-                    SingleProxy::Sys,
-                    Client::builder()
-                        .https_only(true)
-                        .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
-                        .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
-                        .build()
-                        .expect("创建默认客户端失败"),
-                );
-            }
-            SingleProxy::Url(url) => {
-                clients.insert(
-                    (*self).clone(),
-                    Client::builder()
-                        .https_only(true)
-                        .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
-                        .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
-                        .proxy(url.to_proxy())
-                        .build()
-                        .expect("创建代理客户端失败"),
-                );
-            }
-        }
+        let client = match self {
+            SingleProxy::Non => Client::builder()
+                .https_only(true)
+                .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
+                .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
+                .no_proxy()
+                .build()
+                .expect("创建无代理客户端失败"),
+            SingleProxy::Sys => Client::builder()
+                .https_only(true)
+                .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
+                .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
+                .build()
+                .expect("创建默认客户端失败"),
+            SingleProxy::Url(url) => Client::builder()
+                .https_only(true)
+                .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
+                .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
+                .proxy(url.to_proxy())
+                .build()
+                .expect("创建代理客户端失败"),
+        };
+
+        clients.insert(self.clone(), client);
     }
 }
 
 impl Serialize for SingleProxy {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+    where S: serde::Serializer {
         match self {
             Self::Non => serializer.serialize_str(NON_PROXY),
             Self::Sys => serializer.serialize_str(SYS_PROXY),
@@ -278,22 +266,18 @@ impl Serialize for SingleProxy {
 
 impl<'de> Deserialize<'de> for SingleProxy {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         struct SingleProxyVisitor;
 
         impl serde::de::Visitor<'_> for SingleProxyVisitor {
             type Value = SingleProxy;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                 formatter.write_str("a string representing 'non', 'sys', or a valid URL")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
+            where E: serde::de::Error {
                 match value {
                     NON_PROXY => Ok(Self::Value::Non),
                     SYS_PROXY => Ok(Self::Value::Sys),
@@ -309,13 +293,13 @@ impl<'de> Deserialize<'de> for SingleProxy {
     }
 }
 
-impl std::fmt::Display for SingleProxy {
+impl core::fmt::Display for SingleProxy {
     #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Non => write!(f, "{NON_PROXY}"),
-            Self::Sys => write!(f, "{SYS_PROXY}"),
-            Self::Url(url) => write!(f, "{url}"),
+            Self::Non => f.write_str(NON_PROXY),
+            Self::Sys => f.write_str(SYS_PROXY),
+            Self::Url(url) => f.write_str(url),
         }
     }
 }
@@ -333,67 +317,60 @@ impl FromStr for SingleProxy {
     }
 }
 
-// 获取客户端
+/// 根据名称获取对应的客户端
+///
+/// 如果找不到指定名称的代理，返回通用客户端
 #[inline]
-pub fn get_client(url: &str) -> Client {
+pub fn get_client(name: &str) -> Client {
     // 先通过名称查找代理配置
-    if let Some(proxy) = proxies().load().get(url) {
+    if let Some(proxy) = proxies().load().get(name) {
         // 然后通过代理配置查找客户端
         if let Some(client) = clients().load().get(proxy) {
             return client.clone();
         }
     }
 
-    // 返回通用客户端或默认客户端
+    // 返回通用客户端
     get_general_client()
 }
 
-// 获取通用客户端
+/// 获取通用客户端
 #[inline]
 pub fn get_general_client() -> Client { general_client().load_full() }
 
-// 获取客户端或通用客户端
+/// 根据可选的名称获取客户端
 #[inline]
-pub fn get_client_or_general(url: Option<&str>) -> Client {
-    match url {
-        Some(url) => get_client(url),
+pub fn get_client_or_general(name: Option<&str>) -> Client {
+    match name {
+        Some(name) => get_client(name),
         None => get_general_client(),
     }
 }
 
-/// 设置通用客户端
+/// 更新通用客户端引用
+///
+/// 前置条件：general_name 必须存在于 proxies 中，
+/// 且对应的代理必须存在于 clients 中
 #[inline]
 fn set_general() {
-    general_client().store(
+    general_client().store(unsafe {
         clients()
             .load()
-            .get(
-                proxies()
-                    .load()
-                    .get(&*general_name().load_full())
-                    .expect(PROXY_NOT_FOUND_IN_LIST),
-            )
-            .expect(PROXY_CLIENT_NOT_FOUND_IN_POOL)
-            .clone(),
-    );
+            .get(proxies().load().get(&*general_name().load_full()).unwrap_unchecked())
+            .unwrap_unchecked()
+            .clone()
+    });
 }
 
+// 访问器函数
 #[inline]
-pub fn proxies() -> &'static ArcSwap<HashMap<String, SingleProxy>> {
-    PROXIES.get().expect("proxies does not init")
-}
+pub fn proxies() -> &'static ArcSwap<HashMap<String, SingleProxy>> { PROXIES.get() }
 
 #[inline]
-pub fn general_name() -> &'static ArcSwap<String> {
-    GENERAL_NAME.get().expect("general_name does not init")
-}
+pub fn general_name() -> &'static ArcSwap<String> { GENERAL_NAME.get() }
 
 #[inline]
-fn clients() -> &'static ArcSwap<HashMap<SingleProxy, Client>> {
-    CLIENTS.get().expect("clients does not init")
-}
+fn clients() -> &'static ArcSwap<HashMap<SingleProxy, Client>> { CLIENTS.get() }
 
 #[inline]
-fn general_client() -> &'static ArcSwapAny<Client> {
-    GENERAL_CLIENT.get().expect("general_client does not init")
-}
+fn general_client() -> &'static ArcSwapAny<Client> { GENERAL_CLIENT.get() }

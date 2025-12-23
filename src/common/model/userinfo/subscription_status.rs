@@ -80,18 +80,14 @@ impl SubscriptionStatus {
 
 impl ::serde::Serialize for SubscriptionStatus {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
+    where S: ::serde::Serializer {
         serializer.serialize_str(self.as_str())
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for SubscriptionStatus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         Self::from_str(&s).ok_or_else(|| {
             ::serde::de::Error::custom(format_args!("unknown subscription status: {s}"))

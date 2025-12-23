@@ -1,6 +1,8 @@
+use crate::common::model::HeaderValue;
+
 mod version;
 pub use version::{
-    cursor_client_version, header_value_ua_cursor_latest, initialize_cursor_version,
+    cursor_client_version, cursor_version, header_value_ua_cursor_latest, initialize_cursor_version,
 };
 
 /// 定义 HeaderName 常量
@@ -33,21 +35,20 @@ macro_rules! def_header_name {
 macro_rules! def_header_value {
     ($(($const_name:ident, $value:expr)),+ $(,)?) => {
         $(
-            pub const $const_name: http::header::HeaderValue =
-                http::header::HeaderValue::from_static($value);
+            pub const $const_name: http::header::HeaderValue = HeaderValue::from_static($value).into();
         )+
     };
 }
 
 #[cfg(windows)]
-pub const UA: http::header::HeaderValue = http::header::HeaderValue::from_static(
+pub const UA: http::header::HeaderValue = HeaderValue::from_static(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-);
+).into();
 
 #[cfg(unix)]
-pub const UA: http::header::HeaderValue = http::header::HeaderValue::from_static(
+pub const UA: http::header::HeaderValue = HeaderValue::from_static(
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-);
+).into();
 
 def_header_value! {
     (NONE, ""),
@@ -78,7 +79,8 @@ def_header_value! {
     (JSON, "application/json"),
     (PROTO, "application/proto"),
     (CONNECT_PROTO, "application/connect+proto"),
-    (CURSOR_REFERER_URL, "https://www.cursor.com/dashboard"),
+    (CURSOR_ORIGIN, "https://cursor.com"),
+    (CURSOR_REFERER_URL, "https://cursor.com/dashboard"),
 }
 
 def_header_name! {
@@ -107,6 +109,8 @@ def_header_name! {
     (SEC_FETCH_SITE, "sec-fetch-site"),
     (SEC_GPC, "sec-gpc"),
     (PRIORITY, "priority"),
+    (STAINLESS_OS, "x-stainless-os"),
+    (STAINLESS_ARCH, "x-stainless-arch"),
 }
 
 macro_rules! def_content_type {
@@ -148,7 +152,7 @@ macro_rules! def_content_type {
         $(paste::paste! {
             const [<$name:upper>]: &'static str = $value;
             pub const [<HEADER_VALUE_ $name:upper>]: http::header::HeaderValue =
-                http::header::HeaderValue::from_static([<$name:upper>]);
+                HeaderValue::from_static([<$name:upper>]).into();
         })*
     };
 
@@ -162,8 +166,8 @@ def_content_type!(
     // 文本类型
     text_html_utf8 => "text/html;charset=utf-8",
     text_plain_utf8 => "text/plain;charset=utf-8",
-    text_css_utf8 => "text/css;charset=utf-8",
-    text_js_utf8 => "text/javascript;charset=utf-8",
+    text_css_utf8 = "text/css;charset=utf-8",
+    application_js_utf8 = "application/javascript;charset=utf-8",
     text_csv_utf8 = "text/csv;charset=utf-8",
     text_xml_utf8 = "text/xml;charset=utf-8",
     text_markdown_utf8 = "text/markdown;charset=utf-8",
@@ -231,8 +235,8 @@ static EXTENSION_TO_MIME: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "htm" => TEXT_HTML_UTF8,
     "txt" => TEXT_PLAIN_UTF8,
     "css" => TEXT_CSS_UTF8,
-    "js" => TEXT_JS_UTF8,
-    "mjs" => TEXT_JS_UTF8,
+    "js" => APPLICATION_JS_UTF8,
+    "mjs" => APPLICATION_JS_UTF8,
     "csv" => TEXT_CSV_UTF8,
     "xml" => TEXT_XML_UTF8,
     "md" => TEXT_MARKDOWN_UTF8,
@@ -299,10 +303,122 @@ static EXTENSION_TO_MIME: phf::Map<&'static str, &'static str> = phf::phf_map! {
 
 /// 根据文件扩展名获取对应的 Content-Type HeaderValue
 pub fn get_content_type_by_extension(extension: &str) -> http::header::HeaderValue {
+    let extension = if extension.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        alloc::borrow::Cow::Borrowed(extension)
+    } else {
+        alloc::borrow::Cow::Owned(extension.to_ascii_lowercase())
+    };
     http::header::HeaderValue::from_static(
-        EXTENSION_TO_MIME
-            .get(&extension.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(APPLICATION_OCTET_STREAM),
+        EXTENSION_TO_MIME.get(&*extension).copied().unwrap_or(APPLICATION_OCTET_STREAM),
     )
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentType {
+    TextHtmlUtf8,
+    TextPlainUtf8,
+    TextCssUtf8,
+    ApplicationJavascriptUtf8,
+    TextCsvUtf8,
+    TextXmlUtf8,
+    TextMarkdownUtf8,
+    ImageJpeg,
+    ImagePng,
+    ImageGif,
+    ImageWebp,
+    ImageSvgXml,
+    ImageBmp,
+    ImageIco,
+    ImageTiff,
+    ImageAvif,
+    AudioMpeg,
+    AudioMp4,
+    AudioWav,
+    AudioOgg,
+    AudioWebm,
+    AudioAac,
+    AudioFlac,
+    AudioM4a,
+    VideoMp4,
+    VideoMpeg,
+    VideoWebm,
+    VideoOgg,
+    VideoAvi,
+    VideoQuicktime,
+    VideoXFlv,
+    ApplicationPdf,
+    ApplicationMsword,
+    ApplicationWordDocx,
+    ApplicationExcelXls,
+    ApplicationExcelXlsx,
+    ApplicationPowerpointPpt,
+    ApplicationPowerpointPptx,
+    ApplicationZip,
+    ApplicationRar,
+    Application7z,
+    ApplicationGzip,
+    ApplicationTar,
+    FontTtf,
+    FontOtf,
+    FontWoff,
+    FontWoff2,
+    ApplicationOctetStream,
+}
+
+impl From<ContentType> for http::HeaderValue {
+    #[inline]
+    fn from(ty: ContentType) -> Self {
+        let s = match ty {
+            ContentType::TextHtmlUtf8 => TEXT_HTML_UTF8,
+            ContentType::TextPlainUtf8 => TEXT_PLAIN_UTF8,
+            ContentType::TextCssUtf8 => TEXT_CSS_UTF8,
+            ContentType::ApplicationJavascriptUtf8 => APPLICATION_JS_UTF8,
+            ContentType::TextCsvUtf8 => TEXT_CSV_UTF8,
+            ContentType::TextXmlUtf8 => TEXT_XML_UTF8,
+            ContentType::TextMarkdownUtf8 => TEXT_MARKDOWN_UTF8,
+            ContentType::ImageJpeg => IMAGE_JPEG,
+            ContentType::ImagePng => IMAGE_PNG,
+            ContentType::ImageGif => IMAGE_GIF,
+            ContentType::ImageWebp => IMAGE_WEBP,
+            ContentType::ImageSvgXml => IMAGE_SVG_XML,
+            ContentType::ImageBmp => IMAGE_BMP,
+            ContentType::ImageIco => IMAGE_ICO,
+            ContentType::ImageTiff => IMAGE_TIFF,
+            ContentType::ImageAvif => IMAGE_AVIF,
+            ContentType::AudioMpeg => AUDIO_MPEG,
+            ContentType::AudioMp4 => AUDIO_MP4,
+            ContentType::AudioWav => AUDIO_WAV,
+            ContentType::AudioOgg => AUDIO_OGG,
+            ContentType::AudioWebm => AUDIO_WEBM,
+            ContentType::AudioAac => AUDIO_AAC,
+            ContentType::AudioFlac => AUDIO_FLAC,
+            ContentType::AudioM4a => AUDIO_M4A,
+            ContentType::VideoMp4 => VIDEO_MP4,
+            ContentType::VideoMpeg => VIDEO_MPEG,
+            ContentType::VideoWebm => VIDEO_WEBM,
+            ContentType::VideoOgg => VIDEO_OGG,
+            ContentType::VideoAvi => VIDEO_AVI,
+            ContentType::VideoQuicktime => VIDEO_QUICKTIME,
+            ContentType::VideoXFlv => VIDEO_X_FLV,
+            ContentType::ApplicationPdf => APPLICATION_PDF,
+            ContentType::ApplicationMsword => APPLICATION_MSWORD,
+            ContentType::ApplicationWordDocx => APPLICATION_WORD_DOCX,
+            ContentType::ApplicationExcelXls => APPLICATION_EXCEL_XLS,
+            ContentType::ApplicationExcelXlsx => APPLICATION_EXCEL_XLSX,
+            ContentType::ApplicationPowerpointPpt => APPLICATION_POWERPOINT_PPT,
+            ContentType::ApplicationPowerpointPptx => APPLICATION_POWERPOINT_PPTX,
+            ContentType::ApplicationZip => APPLICATION_ZIP,
+            ContentType::ApplicationRar => APPLICATION_RAR,
+            ContentType::Application7z => APPLICATION_7Z,
+            ContentType::ApplicationGzip => APPLICATION_GZIP,
+            ContentType::ApplicationTar => APPLICATION_TAR,
+            ContentType::FontTtf => FONT_TTF,
+            ContentType::FontOtf => FONT_OTF,
+            ContentType::FontWoff => FONT_WOFF,
+            ContentType::FontWoff2 => FONT_WOFF2,
+            ContentType::ApplicationOctetStream => APPLICATION_OCTET_STREAM,
+        };
+        HeaderValue::from_static(s).into()
+    }
 }

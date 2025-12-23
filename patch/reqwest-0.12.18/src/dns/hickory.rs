@@ -1,13 +1,13 @@
 //! DNS resolution via the [hickory-resolver](https://github.com/hickory-dns/hickory-dns) crate
 
-use hickory_resolver::{
-    config::LookupIpStrategy, lookup_ip::LookupIpIntoIter, ResolveError, TokioResolver,
-};
-use once_cell::sync::OnceCell;
-
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use hickory_resolver::{ResolveError, TokioResolver};
+use hickory_resolver::config::LookupIpStrategy;
+use hickory_resolver::lookup_ip::LookupIpIntoIter;
+use once_cell::sync::OnceCell;
 
 use super::{Addrs, Name, Resolve, Resolving};
 
@@ -34,9 +34,7 @@ impl Resolve for HickoryDnsResolver {
             let resolver = resolver.state.get_or_try_init(new_resolver)?;
 
             let lookup = resolver.lookup_ip(name.as_str()).await?;
-            let addrs: Addrs = Box::new(SocketAddrs {
-                iter: lookup.into_iter(),
-            });
+            let addrs: Addrs = Box::new(SocketAddrs { iter: lookup.into_iter() });
             Ok(addrs)
         })
     }

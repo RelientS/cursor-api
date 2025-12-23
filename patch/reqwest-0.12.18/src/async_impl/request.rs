@@ -6,18 +6,19 @@ use std::time::Duration;
 use serde::Serialize;
 #[cfg(feature = "json")]
 use serde_json;
+use http::{Extensions, Request as HttpRequest, Version};
+use http::request::Parts;
 
 use super::body::Body;
 use super::client::{Client, Pending};
 #[cfg(feature = "multipart")]
 use super::multipart;
 use super::response::Response;
-use crate::config::{RequestConfig, RequestTimeout};
+use crate::config::{RequestConfig, TotalTimeout};
 #[cfg(feature = "multipart")]
 use crate::header::CONTENT_LENGTH;
-use crate::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use crate::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use crate::{Method, Url};
-use http::{request::Parts, Extensions, Request as HttpRequest, Version};
 
 /// A request which can be executed with `Client::execute()`.
 pub struct Request {
@@ -54,87 +55,63 @@ impl Request {
 
     /// Get the method.
     #[inline]
-    pub fn method(&self) -> &Method {
-        &self.method
-    }
+    pub fn method(&self) -> &Method { &self.method }
 
     /// Get a mutable reference to the method.
     #[inline]
-    pub fn method_mut(&mut self) -> &mut Method {
-        &mut self.method
-    }
+    pub fn method_mut(&mut self) -> &mut Method { &mut self.method }
 
     /// Get the url.
     #[inline]
-    pub fn url(&self) -> &Url {
-        &self.url
-    }
+    pub fn url(&self) -> &Url { &self.url }
 
     /// Get a mutable reference to the url.
     #[inline]
-    pub fn url_mut(&mut self) -> &mut Url {
-        &mut self.url
-    }
+    pub fn url_mut(&mut self) -> &mut Url { &mut self.url }
 
     /// Get the headers.
     #[inline]
-    pub fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
+    pub fn headers(&self) -> &HeaderMap { &self.headers }
 
     /// Get a mutable reference to the headers.
     #[inline]
-    pub fn headers_mut(&mut self) -> &mut HeaderMap {
-        &mut self.headers
-    }
+    pub fn headers_mut(&mut self) -> &mut HeaderMap { &mut self.headers }
 
     /// Get the body.
     #[inline]
-    pub fn body(&self) -> Option<&Body> {
-        self.body.as_ref()
-    }
+    pub fn body(&self) -> Option<&Body> { self.body.as_ref() }
 
     /// Get a mutable reference to the body.
     #[inline]
-    pub fn body_mut(&mut self) -> &mut Option<Body> {
-        &mut self.body
-    }
+    pub fn body_mut(&mut self) -> &mut Option<Body> { &mut self.body }
 
     /// Get the extensions.
     #[inline]
-    pub(crate) fn extensions(&self) -> &Extensions {
-        &self.extensions
-    }
+    pub(crate) fn extensions(&self) -> &Extensions { &self.extensions }
 
     /// Get a mutable reference to the extensions.
     #[inline]
-    pub(crate) fn extensions_mut(&mut self) -> &mut Extensions {
-        &mut self.extensions
-    }
+    pub(crate) fn extensions_mut(&mut self) -> &mut Extensions { &mut self.extensions }
 
     /// Get the timeout.
     #[inline]
     pub fn timeout(&self) -> Option<&Duration> {
-        RequestConfig::<RequestTimeout>::get(&self.extensions)
+        RequestConfig::<TotalTimeout>::get(&self.extensions)
     }
 
     /// Get a mutable reference to the timeout.
     #[inline]
     pub fn timeout_mut(&mut self) -> &mut Option<Duration> {
-        RequestConfig::<RequestTimeout>::get_mut(&mut self.extensions)
+        RequestConfig::<TotalTimeout>::get_mut(&mut self.extensions)
     }
 
     /// Get the http version.
     #[inline]
-    pub fn version(&self) -> Version {
-        self.version
-    }
+    pub fn version(&self) -> Version { self.version }
 
     /// Get a mutable reference to the http version.
     #[inline]
-    pub fn version_mut(&mut self) -> &mut Version {
-        &mut self.version
-    }
+    pub fn version_mut(&mut self) -> &mut Version { &mut self.version }
 
     /// Attempt to clone the request.
     ///
@@ -154,14 +131,7 @@ impl Request {
     }
 
     pub(super) fn pieces(self) -> (Method, Url, HeaderMap, Option<Body>, Version, Extensions) {
-        (
-            self.method,
-            self.url,
-            self.headers,
-            self.body,
-            self.version,
-            self.extensions,
-        )
+        (self.method, self.url, self.headers, self.body, self.version, self.extensions)
     }
 }
 
@@ -169,11 +139,7 @@ impl RequestBuilder {
     pub(super) fn new(client: Client, request: crate::Result<Request>) -> RequestBuilder {
         let mut builder = RequestBuilder { client, request };
 
-        let auth = builder
-            .request
-            .as_mut()
-            .ok()
-            .and_then(|req| extract_authority(&mut req.url));
+        let auth = builder.request.as_mut().ok().and_then(|req| extract_authority(&mut req.url));
 
         if let Some((username, password)) = auth {
             builder.basic_auth(username, password)
@@ -184,10 +150,7 @@ impl RequestBuilder {
 
     /// Assemble a builder starting from an existing `Client` and a `Request`.
     pub fn from_parts(client: Client, request: Request) -> RequestBuilder {
-        RequestBuilder {
-            client,
-            request: crate::Result::Ok(request),
-        }
+        RequestBuilder { client, request: crate::Result::Ok(request) }
     }
 
     /// Add a `Header` to this Request.
@@ -268,9 +231,7 @@ impl RequestBuilder {
 
     /// Enable HTTP bearer authentication.
     pub fn bearer_auth<T>(self, token: T) -> RequestBuilder
-    where
-        T: fmt::Display,
-    {
+    where T: fmt::Display {
         let header_value = format!("Bearer {token}");
         self.header_sensitive(crate::header::AUTHORIZATION, header_value, true)
     }
@@ -418,9 +379,7 @@ impl RequestBuilder {
                 Ok(body) => {
                     req.headers_mut()
                         .entry(CONTENT_TYPE)
-                        .or_insert(HeaderValue::from_static(
-                            "application/x-www-form-urlencoded",
-                        ));
+                        .or_insert(HeaderValue::from_static("application/x-www-form-urlencoded"));
                     *req.body_mut() = Some(body.into());
                 }
                 Err(err) => error = Some(crate::error::builder(err)),
@@ -473,24 +432,18 @@ impl RequestBuilder {
     // future patch version.
     #[doc(hidden)]
     #[cfg_attr(target_arch = "wasm32", deprecated)]
-    pub fn fetch_mode_no_cors(self) -> RequestBuilder {
-        self
-    }
+    pub fn fetch_mode_no_cors(self) -> RequestBuilder { self }
 
     /// Build a `Request`, which can be inspected, modified and executed with
     /// `Client::execute()`.
-    pub fn build(self) -> crate::Result<Request> {
-        self.request
-    }
+    pub fn build(self) -> crate::Result<Request> { self.request }
 
     /// Build a `Request`, which can be inspected, modified and executed with
     /// `Client::execute()`.
     ///
     /// This is similar to [`RequestBuilder::build()`], but also returns the
     /// embedded `Client`.
-    pub fn build_split(self) -> (Client, crate::Result<Request>) {
-        (self.client, self.request)
-    }
+    pub fn build_split(self) -> (Client, crate::Result<Request>) { (self.client, self.request) }
 
     /// Constructs the Request and sends it to the target URL, returning a
     /// future Response.
@@ -544,10 +497,7 @@ impl RequestBuilder {
             .as_ref()
             .ok()
             .and_then(|req| req.try_clone())
-            .map(|req| RequestBuilder {
-                client: self.client.clone(),
-                request: Ok(req),
-            })
+            .map(|req| RequestBuilder { client: self.client.clone(), request: Ok(req) })
     }
 }
 
@@ -571,9 +521,7 @@ fn fmt_request_fields<'a, 'b>(
     f: &'a mut fmt::DebugStruct<'a, 'b>,
     req: &Request,
 ) -> &'a mut fmt::DebugStruct<'a, 'b> {
-    f.field("method", &req.method)
-        .field("url", &req.url)
-        .field("headers", &req.headers)
+    f.field("method", &req.method).field("url", &req.url).field("headers", &req.headers)
 }
 
 /// Check the request URL for a "username:password" type authority, and if
@@ -582,21 +530,13 @@ pub(crate) fn extract_authority(url: &mut Url) -> Option<(String, Option<String>
     use percent_encoding::percent_decode;
 
     if url.has_authority() {
-        let username: String = percent_decode(url.username().as_bytes())
-            .decode_utf8()
-            .ok()?
-            .into();
-        let password = url.password().and_then(|pass| {
-            percent_decode(pass.as_bytes())
-                .decode_utf8()
-                .ok()
-                .map(String::from)
-        });
+        let username: String = percent_decode(url.username().as_bytes()).decode_utf8().ok()?.into();
+        let password = url
+            .password()
+            .and_then(|pass| percent_decode(pass.as_bytes()).decode_utf8().ok().map(String::from));
         if !username.is_empty() || password.is_some() {
-            url.set_username("")
-                .expect("has_authority means set_username shouldn't fail");
-            url.set_password(None)
-                .expect("has_authority means set_password shouldn't fail");
+            url.set_username("").expect("has_authority means set_username shouldn't fail");
+            url.set_password(None).expect("has_authority means set_password shouldn't fail");
             return Some((username, password));
         }
     }
@@ -605,30 +545,15 @@ pub(crate) fn extract_authority(url: &mut Url) -> Option<(String, Option<String>
 }
 
 impl<T> TryFrom<HttpRequest<T>> for Request
-where
-    T: Into<Body>,
+where T: Into<Body>
 {
     type Error = crate::Error;
 
     fn try_from(req: HttpRequest<T>) -> crate::Result<Self> {
         let (parts, body) = req.into_parts();
-        let Parts {
-            method,
-            uri,
-            headers,
-            version,
-            extensions,
-            ..
-        } = parts;
+        let Parts { method, uri, headers, version, extensions, .. } = parts;
         let url = Url::parse(&uri.to_string()).map_err(crate::error::builder)?;
-        Ok(Request {
-            method,
-            url,
-            headers,
-            body: Some(body.into()),
-            version,
-            extensions,
-        })
+        Ok(Request { method, url, headers, body: Some(body.into()), version, extensions })
     }
 }
 
@@ -636,15 +561,7 @@ impl TryFrom<Request> for HttpRequest<Body> {
     type Error = crate::Error;
 
     fn try_from(req: Request) -> crate::Result<Self> {
-        let Request {
-            method,
-            url,
-            headers,
-            body,
-            version,
-            extensions,
-            ..
-        } = req;
+        let Request { method, url, headers, body, version, extensions, .. } = req;
 
         let mut req = HttpRequest::builder()
             .version(version)
@@ -663,11 +580,13 @@ impl TryFrom<Request> for HttpRequest<Body> {
 mod tests {
     #![cfg(not(feature = "rustls-tls-manual-roots-no-provider"))]
 
-    use super::{Client, HttpRequest, Request, RequestBuilder, Version};
-    use crate::Method;
-    use serde::Serialize;
     use std::collections::BTreeMap;
     use std::convert::TryFrom;
+
+    use serde::Serialize;
+
+    use super::{Client, HttpRequest, Request, RequestBuilder, Version};
+    use crate::Method;
 
     #[test]
     fn add_query_append() {
@@ -706,10 +625,7 @@ mod tests {
         let some_url = "https://google.com/";
         let r = client.get(some_url);
 
-        let params = Params {
-            foo: "bar".into(),
-            qux: 3,
-        };
+        let params = Params { foo: "bar".into(), qux: 3 };
 
         let r = r.query(&params);
 
@@ -764,11 +680,7 @@ mod tests {
         let some_url = "https://google.com/";
         let empty_query: &[(&str, &str)] = &[];
 
-        let req = client
-            .get(some_url)
-            .query(empty_query)
-            .build()
-            .expect("request build");
+        let req = client.get(some_url).query(empty_query).build().expect("request build");
 
         assert_eq!(req.url().query(), None);
         assert_eq!(req.url().as_str(), "https://google.com/");
@@ -777,15 +689,9 @@ mod tests {
     #[test]
     fn try_clone_reusable() {
         let client = Client::new();
-        let builder = client
-            .post("http://httpbin.org/post")
-            .header("foo", "bar")
-            .body("from a &str!");
-        let req = builder
-            .try_clone()
-            .expect("clone successful")
-            .build()
-            .expect("request is valid");
+        let builder =
+            client.post("http://httpbin.org/post").header("foo", "bar").body("from a &str!");
+        let req = builder.try_clone().expect("clone successful").build().expect("request is valid");
         assert_eq!(req.url().as_str(), "http://httpbin.org/post");
         assert_eq!(req.method(), Method::POST);
         assert_eq!(req.headers()["foo"], "bar");
@@ -795,11 +701,7 @@ mod tests {
     fn try_clone_no_body() {
         let client = Client::new();
         let builder = client.get("http://httpbin.org/get");
-        let req = builder
-            .try_clone()
-            .expect("clone successful")
-            .build()
-            .expect("request is valid");
+        let req = builder.try_clone().expect("clone successful").build().expect("request is valid");
         assert_eq!(req.url().as_str(), "http://httpbin.org/get");
         assert_eq!(req.method(), Method::GET);
         assert!(req.body().is_none());
@@ -811,9 +713,7 @@ mod tests {
         let chunks: Vec<Result<_, ::std::io::Error>> = vec![Ok("hello"), Ok(" "), Ok("world")];
         let stream = futures_util::stream::iter(chunks);
         let client = Client::new();
-        let builder = client
-            .get("http://httpbin.org/get")
-            .body(super::Body::wrap_stream(stream));
+        let builder = client.get("http://httpbin.org/get").body(super::Body::wrap_stream(stream));
         let clone = builder.try_clone();
         assert!(clone.is_none());
     }
@@ -826,10 +726,7 @@ mod tests {
         let req = client.get(some_url).build().expect("request build");
 
         assert_eq!(req.url().as_str(), "https://localhost/");
-        assert_eq!(
-            req.headers()["authorization"],
-            "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
-        );
+        assert_eq!(req.headers()["authorization"], "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
     }
 
     #[test]
@@ -844,10 +741,7 @@ mod tests {
             .expect("request build");
 
         assert_eq!(req.url().as_str(), "https://localhost/");
-        assert_eq!(
-            req.headers()["authorization"],
-            "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
-        );
+        assert_eq!(req.headers()["authorization"], "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
         assert!(req.headers()["authorization"].is_sensitive());
     }
 
@@ -856,11 +750,7 @@ mod tests {
         let client = Client::new();
         let some_url = "https://localhost/";
 
-        let req = client
-            .get(some_url)
-            .bearer_auth("Hold my bear")
-            .build()
-            .expect("request build");
+        let req = client.get(some_url).bearer_auth("Hold my bear").build().expect("request build");
 
         assert_eq!(req.url().as_str(), "https://localhost/");
         assert_eq!(req.headers()["authorization"], "Bearer Hold my bear");
@@ -875,11 +765,7 @@ mod tests {
         let mut header = http::HeaderValue::from_static("in plain sight");
         header.set_sensitive(true);
 
-        let req = client
-            .get(some_url)
-            .header("hiding", header)
-            .build()
-            .expect("request build");
+        let req = client.get(some_url).header("hiding", header).build().expect("request build");
 
         assert_eq!(req.url().as_str(), "https://localhost/");
         assert_eq!(req.headers()["hiding"], "in plain sight");

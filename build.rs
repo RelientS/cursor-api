@@ -1,8 +1,8 @@
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 use sha2::{Digest, Sha256};
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 use std::collections::HashMap;
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 use std::fs;
 #[cfg(not(debug_assertions))]
 #[cfg(feature = "__preview")]
@@ -11,28 +11,29 @@ use std::io::Result;
 #[cfg(not(debug_assertions))]
 #[cfg(feature = "__preview")]
 use std::io::{Read, Write};
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 use std::path::Path;
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 use std::path::PathBuf;
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 use std::process::Command;
 
 // 支持的文件类型
-#[cfg(not(any(feature = "use-minified")))]
-const SUPPORTED_EXTENSIONS: [&str; 4] = ["html", "js", "css", "md"];
+// #[cfg(not(feature = "use-minified"))]
+// const SUPPORTED_EXTENSIONS: [&str; 4] = ["html", "js", "css", "md"];
 
-#[cfg(not(any(feature = "use-minified")))]
+// 需要处理的 Markdown 文件列表
+#[cfg(not(feature = "use-minified"))]
+const MARKDOWN_FILES: [&str; 2] = ["README.md", "LICENSE.md"];
+
+#[cfg(not(feature = "use-minified"))]
 fn check_and_install_deps() -> Result<()> {
     let scripts_dir = Path::new("scripts");
     let node_modules = scripts_dir.join("node_modules");
 
     if !node_modules.exists() {
         println!("cargo:warning=Installing minifier dependencies...");
-        let status = Command::new("npm")
-            .current_dir(scripts_dir)
-            .arg("install")
-            .status()?;
+        let status = Command::new("npm").current_dir(scripts_dir).arg("install").status()?;
 
         if !status.success() {
             panic!("Failed to install npm dependencies");
@@ -42,67 +43,100 @@ fn check_and_install_deps() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 fn get_files_hash() -> Result<HashMap<PathBuf, String>> {
     let mut file_hashes = HashMap::new();
-    let static_dir = Path::new("static");
+    // let static_dir = Path::new("static");
 
-    // 首先处理 README.md
-    let readme_path = Path::new("README.md");
-    if readme_path.exists() {
-        let content = fs::read(readme_path)?;
-        let hash = format!("{:x}", Sha256::new().chain_update(&content).finalize());
-        file_hashes.insert(readme_path.to_path_buf(), hash);
+    pub const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
+    #[inline]
+    pub fn to_str<'buf>(bytes: &[u8], buf: &'buf mut [u8]) -> &'buf mut str {
+        for (i, &byte) in bytes.iter().enumerate() {
+            buf[i * 2] = HEX_CHARS[(byte >> 4) as usize];
+            buf[i * 2 + 1] = HEX_CHARS[(byte & 0x0f) as usize];
+        }
+
+        // SAFETY: 输出都是有效的 ASCII 字符
+        unsafe { core::str::from_utf8_unchecked_mut(buf) }
     }
 
-    if static_dir.exists() {
-        for entry in fs::read_dir(static_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            // 检查是否是支持的文件类型，且不是已经压缩的文件
-            if let Some(ext) = path.extension().and_then(|e| e.to_str())
-                && SUPPORTED_EXTENSIONS.contains(&ext)
-                && !path.to_string_lossy().contains(".min.")
-            {
-                let content = fs::read(&path)?;
-                let hash = format!("{:x}", Sha256::new().chain_update(&content).finalize());
-                file_hashes.insert(path, hash);
-            }
+    // 处理根目录的 Markdown 文件
+    for md_file in MARKDOWN_FILES {
+        let md_path = Path::new(md_file);
+        if md_path.exists() {
+            let content = fs::read(md_path)?;
+            #[allow(deprecated)]
+            let hash =
+                to_str(Sha256::new().chain_update(&content).finalize().as_slice(), &mut [0; 64])
+                    .to_string();
+            file_hashes.insert(md_path.to_path_buf(), hash);
         }
     }
+
+    // 处理 static 目录中的文件
+    // if static_dir.exists() {
+    //     for entry in fs::read_dir(static_dir)? {
+    //         let entry = entry?;
+    //         let path = entry.path();
+
+    //         // 检查是否是支持的文件类型，且不是已经压缩的文件
+    //         if let Some(ext) = path.extension().and_then(|e| e.to_str())
+    //             && SUPPORTED_EXTENSIONS.contains(&ext)
+    //             && !path.to_string_lossy().contains(".min.")
+    //         {
+    //             let content = fs::read(&path)?;
+    //             #[allow(deprecated)]
+    //             let hash =
+    //                 to_str(Sha256::new().chain_update(&content).finalize().as_slice(), &mut [0; 64])
+    //                     .to_string();
+    //             file_hashes.insert(path, hash);
+    //         }
+    //     }
+    // }
 
     Ok(file_hashes)
 }
 
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 fn load_saved_hashes() -> Result<HashMap<PathBuf, String>> {
     let hash_file = Path::new("scripts/.asset-hashes.json");
     if hash_file.exists() {
         let content = fs::read_to_string(hash_file)?;
         let hash_map: HashMap<String, String> = serde_json::from_str(&content)?;
-        Ok(hash_map
-            .into_iter()
-            .map(|(k, v)| (PathBuf::from(k), v))
-            .collect())
+        Ok(hash_map.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect())
     } else {
         Ok(HashMap::new())
     }
 }
 
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
 fn save_hashes(hashes: &HashMap<PathBuf, String>) -> Result<()> {
     let hash_file = Path::new("scripts/.asset-hashes.json");
-    let string_map: HashMap<String, String> = hashes
-        .iter()
-        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.clone()))
-        .collect();
+    let string_map: HashMap<String, String> =
+        hashes.iter().map(|(k, v)| (k.to_string_lossy().into_owned(), v.clone())).collect();
     let content = serde_json::to_string_pretty(&string_map)?;
     fs::write(hash_file, content)?;
     Ok(())
 }
 
-#[cfg(not(any(feature = "use-minified")))]
+#[cfg(not(feature = "use-minified"))]
+fn get_minified_output_path(path: &Path) -> PathBuf {
+    let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
+    // 检查是否是根目录的 Markdown 文件
+    if MARKDOWN_FILES.contains(&file_name) {
+        // 将文件名转换为小写并生成对应的 .min.html 文件
+        let base_name = path.file_stem().unwrap().to_string_lossy().to_lowercase();
+        PathBuf::from(format!("static/{}.min.html", base_name))
+    } else {
+        // 其他文件保持原有逻辑
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        path.with_file_name(format!("{}.min.{}", path.file_stem().unwrap().to_string_lossy(), ext))
+    }
+}
+
+#[cfg(not(feature = "use-minified"))]
 fn minify_assets() -> Result<()> {
     // 获取现有文件的哈希
     let current_hashes = get_files_hash()?;
@@ -119,19 +153,8 @@ fn minify_assets() -> Result<()> {
     let files_to_update: Vec<_> = current_hashes
         .iter()
         .filter(|(path, current_hash)| {
-            let is_readme = path.file_name().is_some_and(|f| f == "README.md");
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-            // 为 README.md 和其他文件使用不同的输出路径检查
-            let min_path = if is_readme {
-                PathBuf::from("static/readme.min.html")
-            } else {
-                path.with_file_name(format!(
-                    "{}.min.{}",
-                    path.file_stem().unwrap().to_string_lossy(),
-                    ext
-                ))
-            };
+            // 获取压缩后的输出路径
+            let min_path = get_minified_output_path(path);
 
             // 检查压缩/转换后的文件是否存在
             if !min_path.exists() {
@@ -150,13 +173,10 @@ fn minify_assets() -> Result<()> {
     }
 
     println!("cargo:warning=Minifying {} files...", files_to_update.len());
-    println!("cargo:warning={}", files_to_update.join(" "));
+    println!("cargo:warning=Files: {}", files_to_update.join(" "));
 
     // 运行压缩脚本
-    let status = Command::new("node")
-        .arg("scripts/minify.js")
-        .args(&files_to_update)
-        .status()?;
+    let status = Command::new("node").arg("scripts/minify.js").args(&files_to_update).status()?;
 
     if !status.success() {
         panic!("Asset minification failed");
@@ -291,35 +311,31 @@ fn main() -> Result<()> {
         }
 
         config
-            .compile_protos(
-                &["src/core/aiserver/v1/lite.proto"],
-                &["src/core/aiserver/v1/"],
-            )
+            .compile_protos(&["src/core/aiserver/v1/lite.proto"], &["src/core/aiserver/v1/"])
             .unwrap();
-        config
-            .compile_protos(&["src/core/config/key.proto"], &["src/core/config/"])
-            .unwrap();
+        // config.compile_protos(&["src/core/config/key.proto"], &["src/core/config/"]).unwrap();
     }
 
     // 静态资源文件处理
     println!("cargo:rerun-if-changed=scripts/minify.js");
-    println!("cargo:rerun-if-changed=scripts/package.json");
-    println!("cargo:rerun-if-changed=static/api.html");
-    println!("cargo:rerun-if-changed=static/build_key.html");
-    println!("cargo:rerun-if-changed=static/config.html");
-    println!("cargo:rerun-if-changed=static/logs.html");
-    println!("cargo:rerun-if-changed=static/proxies.html");
-    println!("cargo:rerun-if-changed=static/shared-styles.css");
-    println!("cargo:rerun-if-changed=static/shared.js");
-    println!("cargo:rerun-if-changed=static/tokens.html");
+    // println!("cargo:rerun-if-changed=scripts/package.json");
+    // println!("cargo:rerun-if-changed=static/api.html");
+    // println!("cargo:rerun-if-changed=static/build_key.html");
+    // println!("cargo:rerun-if-changed=static/config.html");
+    // println!("cargo:rerun-if-changed=static/logs.html");
+    // println!("cargo:rerun-if-changed=static/proxies.html");
+    // println!("cargo:rerun-if-changed=static/shared-styles.css");
+    // println!("cargo:rerun-if-changed=static/shared.js");
+    // println!("cargo:rerun-if-changed=static/tokens.html");
     println!("cargo:rerun-if-changed=README.md");
+    println!("cargo:rerun-if-changed=LICENSE.md");
 
     // 只在release模式下监控VERSION文件变化
     #[cfg(not(debug_assertions))]
     #[cfg(feature = "__preview")]
     println!("cargo:rerun-if-changed=VERSION");
 
-    #[cfg(not(any(feature = "use-minified")))]
+    #[cfg(not(feature = "use-minified"))]
     {
         // 检查并安装依赖
         check_and_install_deps()?;

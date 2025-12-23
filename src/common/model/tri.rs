@@ -1,16 +1,22 @@
-use ::serde::Serialize;
+use serde::Serialize;
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum TriState<T> {
-    #[default]
-    Undefined, // 未定义/字段不存在
-    Null,     // 显式空值
-    Value(T), // 包含具体值
+    Null(bool),
+    Value(T),
+}
+
+impl<T> const Default for TriState<T> {
+    fn default() -> Self {
+        Self::Null(false)
+    }
 }
 
 impl<T> TriState<T> {
     #[inline(always)]
-    pub const fn is_undefined(&self) -> bool { matches!(*self, TriState::Undefined) }
+    pub const fn is_undefined(&self) -> bool {
+        matches!(*self, TriState::Null(false))
+    }
 
     // #[inline(always)]
     // pub const fn is_null(&self) -> bool {
@@ -39,8 +45,8 @@ where
         S: serde::Serializer,
     {
         match self {
-            TriState::Undefined => serializer.serialize_none(),
-            TriState::Null => serializer.serialize_unit(),
+            TriState::Null(false) => __unreachable!(),
+            TriState::Null(true) => serializer.serialize_unit(),
             TriState::Value(value) => value.serialize(serializer),
         }
     }

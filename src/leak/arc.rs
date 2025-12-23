@@ -1,6 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use ::core::{
+use core::{
     alloc::Layout,
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -8,10 +8,9 @@ use ::core::{
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use ::hashbrown::{Equivalent, HashSet};
-use ::parking_lot::RwLock;
-
-use super::manually_init::ManuallyInit;
+use hashbrown::{Equivalent, HashSet};
+use manually_init::ManuallyInit;
+use parking_lot::RwLock;
 
 /// 字符串内容的内部表示
 ///
@@ -82,10 +81,7 @@ impl ArcStrInner {
         let inner = ptr.as_ptr();
 
         // 初始化结构体
-        ::core::ptr::write(inner, Self {
-            count: AtomicUsize::new(1),
-            string_len: string.len(),
-        });
+        ::core::ptr::write(inner, Self { count: AtomicUsize::new(1), string_len: string.len() });
 
         // 复制字符串数据到紧跟结构体后的内存
         let string_ptr = (*inner).string_ptr() as *mut u8;
@@ -123,10 +119,7 @@ impl Clone for ArcStr {
             std::process::abort();
         }
 
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        Self { ptr: self.ptr, _marker: PhantomData }
     }
 }
 
@@ -200,11 +193,9 @@ static ARC_STR_POOL: ManuallyInit<RwLock<HashSet<ThreadSafePtr, ::ahash::RandomS
     ManuallyInit::new();
 
 #[inline(always)]
-pub(super) unsafe fn __init() {
-    ARC_STR_POOL.init(RwLock::new(HashSet::with_capacity_and_hasher(
-        128,
-        ::ahash::RandomState::new(),
-    )))
+pub(super) fn __init() {
+    ARC_STR_POOL
+        .init(RwLock::new(HashSet::with_capacity_and_hasher(128, ::ahash::RandomState::new())))
 }
 
 impl ArcStr {
@@ -212,33 +203,43 @@ impl ArcStr {
     ///
     /// 如果池中已存在相同内容的字符串，则增加其引用计数并返回；
     /// 否则创建新实例并加入池中。
+    ///
+    /// # 并发安全性
+    /// - 使用 read-write lock 保护全局字符串池
+    /// - 快速路径（read lock）：尝试复用已有实例
+    /// - 慢速路径（write lock）：双重检查后创建新实例，防止重复插入
+    ///
+    /// # 示例
+    /// ```
+    /// let s1 = ArcStr::new("hello");
+    /// let s2 = ArcStr::new("hello"); // 复用 s1 的内存，增加引用计数
+    /// assert_eq!(s1.as_ptr(), s2.as_ptr()); // 指向同一内存
+    /// ```
     pub fn new<S: AsRef<str>>(s: S) -> Self {
         let string = s.as_ref();
 
-        // 快速路径：尝试从池中查找
+        // 快速路径：尝试从池中查找并增加引用计数
         {
             let pool = ARC_STR_POOL.read();
             if let Some(ptr_ref) = pool.get(string) {
                 let ptr = ptr_ref.0;
-                // Safety: 池中的指针始终有效
+                // Safety: 池中的指针始终有效（只要池中存在，计数必定 > 0）
                 unsafe {
                     let count = ptr.as_ref().count.fetch_add(1, Ordering::Relaxed);
+                    // 防止引用计数溢出（理论上不可能，但作为安全检查）
                     if count > isize::MAX as usize {
                         __cold_path!();
                         std::process::abort();
                     }
                 }
-                return Self {
-                    ptr,
-                    _marker: PhantomData,
-                };
+                return Self { ptr, _marker: PhantomData };
             }
         }
 
-        // 慢速路径：创建新实例
+        // 慢速路径：创建新实例（需要独占访问池）
         let mut pool = ARC_STR_POOL.write();
 
-        // 双重检查，防止竞态条件
+        // 双重检查：防止在获取 write lock 前，其他线程已经创建了相同的字符串
         if let Some(ptr_ref) = pool.get(string) {
             let ptr = ptr_ref.0;
             // Safety: 池中的指针始终有效
@@ -249,31 +250,27 @@ impl ArcStr {
                     std::process::abort();
                 }
             }
-            return Self {
-                ptr,
-                _marker: PhantomData,
-            };
+            return Self { ptr, _marker: PhantomData };
         }
 
-        // 分配并初始化新实例
+        // 分配并初始化新实例（使用自定义 DST 布局）
         let layout = ArcStrInner::layout_for_string(string.len());
         let ptr = unsafe {
-            let alloc = ::std::alloc::alloc(layout) as *mut ArcStrInner;
+            let alloc = alloc::alloc::alloc(layout) as *mut ArcStrInner;
             if alloc.is_null() {
                 __cold_path!();
-                ::std::alloc::handle_alloc_error(layout);
+                alloc::alloc::handle_alloc_error(layout);
             }
             let ptr = NonNull::new_unchecked(alloc);
+            // 初始化 ArcStrInner，引用计数为 1，并拷贝字符串内容
             ArcStrInner::write_with_string(ptr, string);
             ptr
         };
 
+        // 将新实例插入池中（持有 write lock，保证线程安全）
         pool.insert(ThreadSafePtr(ptr));
 
-        Self {
-            ptr,
-            _marker: PhantomData,
-        }
+        Self { ptr, _marker: PhantomData }
     }
 
     /// 获取字符串切片
@@ -306,24 +303,40 @@ impl ArcStr {
 
 impl Drop for ArcStr {
     fn drop(&mut self) {
-        // Safety: ptr 始终指向有效的 ArcStrInner
+        // Safety: ptr 始终指向有效的 ArcStrInner（在其引用计数 > 0 时）
         unsafe {
             let inner = self.ptr.as_ref();
 
-            // 递减引用计数，如果不是最后一个引用则直接返回
+            // 递减引用计数，使用 Release ordering 确保之前的所有修改对后续操作可见
             if inner.count.fetch_sub(1, Ordering::Release) != 1 {
+                // 不是最后一个引用，直接返回
                 return;
             }
 
-            // 确保其他线程的所有操作都已完成
-            ::core::sync::atomic::fence(Ordering::Acquire);
-
-            // 从池中移除并释放内存
+            // 最后一个引用：需要清理资源
+            // 获取 write lock 以保护池操作，同时防止并发的 new() 操作干扰
             let mut pool = ARC_STR_POOL.write();
+
+            // 双重检查引用计数：防止在等待 write lock 期间，其他线程通过 new() 增加了引用
+            // 关键竞态场景：
+            //   Thread A: fetch_sub 返回 1，认为自己是最后一个引用
+            //   Thread B: 在 new() 中通过 pool.get() 找到相同字符串
+            //   Thread B: fetch_add 增加计数到 1
+            //   Thread A: 获取 write lock
+            // 此时必须重新检查，否则会错误地释放正在使用的内存
+            if inner.count.load(Ordering::Relaxed) != 0 {
+                // 有新的引用产生，取消释放操作
+                return;
+            }
+
+            // 确认是最后一个引用，执行清理：
+            // 1. 从池中移除（防止后续 new() 找到已释放的指针）
+            //    注意：remove 操作通过 Borrow<str> trait 使用字符串内容作为 key
             pool.remove(&ThreadSafePtr(self.ptr));
 
+            // 2. 释放堆内存（包括 ArcStrInner 和内联的字符串数据）
             let layout = ArcStrInner::layout_for_string(inner.string_len);
-            ::std::alloc::dealloc(self.ptr.cast().as_ptr(), layout);
+            alloc::alloc::dealloc(self.ptr.cast().as_ptr(), layout);
         }
     }
 }
@@ -332,20 +345,7 @@ impl Drop for ArcStr {
 
 impl PartialEq for ArcStr {
     #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        // 快速路径：指针相同
-        if self.ptr == other.ptr {
-            return true;
-        }
-
-        // Safety: 两个指针都有效
-        unsafe {
-            let self_inner = self.ptr.as_ref();
-            let other_inner = other.ptr.as_ref();
-            self_inner.string_len == other_inner.string_len
-                && self_inner.as_str() == other_inner.as_str()
-        }
-    }
+    fn eq(&self, other: &Self) -> bool { self.ptr == other.ptr }
 }
 
 impl Eq for ArcStr {}
@@ -429,9 +429,32 @@ impl From<String> for ArcStr {
     fn from(s: String) -> Self { Self::new(s.as_str()) }
 }
 
-impl<'a> From<std::borrow::Cow<'a, str>> for ArcStr {
+impl<'a> From<alloc::borrow::Cow<'a, str>> for ArcStr {
     #[inline]
-    fn from(cow: std::borrow::Cow<'a, str>) -> Self { Self::new(cow.as_ref()) }
+    fn from(cow: alloc::borrow::Cow<'a, str>) -> Self { Self::new(cow.as_ref()) }
+}
+
+// ===== Serde 实现 =====
+
+mod serde_impls {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    impl Serialize for ArcStr {
+        #[inline]
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: Serializer {
+            self.as_str().serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for ArcStr {
+        #[inline]
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where D: Deserializer<'de> {
+            String::deserialize(deserializer).map(ArcStr::new)
+        }
+    }
 }
 
 // ===== 测试辅助函数 =====
@@ -453,9 +476,8 @@ pub fn clear_pool_for_test() {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
-
     use super::*;
+    use std::{thread, time::Duration};
 
     /// 运行隔离的测试，确保池状态不会相互影响
     fn run_isolated_test<F: FnOnce()>(f: F) {
@@ -542,7 +564,7 @@ mod tests {
     #[test]
     fn test_from_implementations() {
         run_isolated_test(|| {
-            use std::borrow::Cow;
+            use alloc::borrow::Cow;
 
             let s1 = ArcStr::from("from_str");
             let s2 = ArcStr::from(String::from("from_string"));
@@ -586,7 +608,7 @@ mod tests {
     #[test]
     fn test_thread_safety() {
         run_isolated_test(|| {
-            use std::sync::Arc;
+            use alloc::sync::Arc;
 
             let s = Arc::new(ArcStr::new("shared"));
             let handles: Vec<_> = (0..10)

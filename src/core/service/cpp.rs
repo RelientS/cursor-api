@@ -1,11 +1,39 @@
-use std::{borrow::Cow, convert::Infallible, sync::Arc};
-
+use crate::{
+    app::{
+        constant::header::{
+            CHUNKED, CLIENT_KEY, EVENT_STREAM, JSON, KEEP_ALIVE, NO_CACHE_REVALIDATE,
+        },
+        lazy::{cpp_config_url, cpp_models_url},
+        model::CppService,
+    },
+    common::{
+        client::{AiServiceRequest, build_client_request},
+        model::{GenericError, error::ChatError},
+        utils::{
+            CollectBytes, CollectBytesParts, encode_message, encode_message_framed, new_uuid_v4,
+        },
+    },
+    core::{
+        aiserver::v1::{
+            AvailableCppModelsResponse, CppConfigRequest, CppConfigResponse, FsSyncFileRequest,
+            FsSyncFileResponse, FsUploadFileRequest, FsUploadFileResponse, StreamCppRequest,
+        },
+        auth::TokenBundle,
+        stream::decoder::{
+            cpp::{StreamDecoder, StreamMessage},
+            direct,
+            types::{DecodedMessage, DecoderError},
+        },
+    },
+};
+use alloc::borrow::Cow;
 use axum::{
     Json,
     body::Body,
     response::{IntoResponse as _, Response},
 };
 use bytes::Bytes;
+use core::convert::Infallible;
 use futures::StreamExt as _;
 use http::{
     Extensions, HeaderMap, StatusCode,
@@ -14,58 +42,31 @@ use http::{
         CONTENT_LENGTH, CONTENT_TYPE, COOKIE, TRANSFER_ENCODING, VARY,
     },
 };
-use tokio::sync::Mutex;
-
-use crate::{
-    app::{
-        constant::{
-            CHUNKED, CLIENT_KEY, ERR_STREAM_RESPONSE, ERROR, EVENT_STREAM, JSON, KEEP_ALIVE,
-            NO_CACHE_REVALIDATE,
-        },
-        lazy::{cpp_config_url, cpp_models_url},
-        model::{CppService, ExtToken},
-    },
-    common::{
-        client::{AiServiceRequest, build_client_request},
-        model::{GenericError, error::ChatError},
-        utils::{encode_message, new_uuid_v4},
-    },
-    core::{
-        aiserver::v1::{
-            AvailableCppModelsResponse, CppConfigRequest, CppConfigResponse, FsSyncFileRequest,
-            FsSyncFileResponse, FsUploadFileRequest, FsUploadFileResponse, StreamCppRequest,
-        },
-        error::StreamError,
-        stream::decoder::{
-            cpp::{StreamDecoder, StreamMessage},
-            direct,
-            types::{DecodedMessage, DecoderError},
-        },
-    },
-};
 
 pub async fn handle_cpp_config(
     mut headers: HeaderMap,
     mut extensions: Extensions,
     Json(request): Json<CppConfigRequest>,
 ) -> Result<Json<CppConfigResponse>, Response> {
-    let (ext_token, is_pri) = extensions
-        .remove::<(ExtToken, bool)>()
-        .expect("middleware doesn't have `(ExtToken, bool)`");
+    let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
+
+    let (data, compressed) = match encode_message(&request) {
+        Ok(o) => o,
+        Err(e) => return Err(e.into_response()),
+    };
 
     let req = build_client_request(AiServiceRequest {
-        ext_token,
+        ext_token: &ext_token,
         fs_client_key: headers.remove(CLIENT_KEY),
-        url: cpp_config_url(is_pri),
-        is_stream: false,
-        trace_id: Some(new_uuid_v4()),
-        is_pri,
+        url: cpp_config_url(use_pri),
+        stream: false,
+        compressed,
+        trace_id: new_uuid_v4(),
+        use_pri,
         cookie: headers.remove(COOKIE),
     });
 
-    let body = __unwrap!(encode_message(&request, false));
-
-    match async { req.body(body).send().await?.bytes().await }.await {
+    match CollectBytes(req.body(data)).await {
         Ok(bytes) => match direct::decode::<CppConfigResponse>(&bytes) {
             Ok(DecodedMessage::Protobuf(data)) => Ok(Json(data)),
             Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
@@ -76,7 +77,7 @@ pub async fn handle_cpp_config(
             )),
             Err(DecoderError::Internal(e)) => Err((
                 StatusCode::BAD_GATEWAY,
-                Json(ChatError::RequestFailed(Cow::Borrowed(e)).to_generic()),
+                Json(ChatError::ProcessingFailed(Cow::Borrowed(e)).to_generic()),
             )
                 .into_response()),
         },
@@ -100,21 +101,20 @@ pub async fn handle_cpp_models(
     mut headers: HeaderMap,
     mut extensions: Extensions,
 ) -> Result<Json<AvailableCppModelsResponse>, Response> {
-    let (ext_token, is_pri) = extensions
-        .remove::<(ExtToken, bool)>()
-        .expect("middleware doesn't have `(ExtToken, bool)`");
+    let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
 
     let req = build_client_request(AiServiceRequest {
-        ext_token,
+        ext_token: &ext_token,
         fs_client_key: headers.remove(CLIENT_KEY),
-        url: cpp_models_url(is_pri),
-        is_stream: false,
-        trace_id: Some(new_uuid_v4()),
-        is_pri,
+        url: cpp_models_url(use_pri),
+        stream: false,
+        compressed: false,
+        trace_id: new_uuid_v4(),
+        use_pri,
         cookie: headers.remove(COOKIE),
     });
 
-    match async { req.send().await?.bytes().await }.await {
+    match CollectBytes(req).await {
         Ok(bytes) => match direct::decode::<AvailableCppModelsResponse>(&bytes) {
             Ok(DecodedMessage::Protobuf(data)) => Ok(Json(data)),
             Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
@@ -125,7 +125,7 @@ pub async fn handle_cpp_models(
             )),
             Err(DecoderError::Internal(e)) => Err((
                 StatusCode::BAD_GATEWAY,
-                Json(ChatError::RequestFailed(Cow::Borrowed(e)).to_generic()),
+                Json(ChatError::ProcessingFailed(Cow::Borrowed(e)).to_generic()),
             )
                 .into_response()),
         },
@@ -158,57 +158,46 @@ pub async fn handle_upload_file(
     mut extensions: Extensions,
     Json(request): Json<FsUploadFileRequest>,
 ) -> Result<Response, Response> {
-    let (ext_token, is_pri) = extensions
-        .remove::<(ExtToken, bool)>()
-        .expect("middleware doesn't have `(ExtToken, bool)`");
-    let gcpp_host = ext_token.get_gcpp_host();
+    let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
+
+    let (data, compressed) = match encode_message(&request) {
+        Ok(o) => o,
+        Err(e) => return Err(e.into_response()),
+    };
 
     let req = build_client_request(AiServiceRequest {
-        ext_token,
+        ext_token: &ext_token,
         fs_client_key: headers.remove(CLIENT_KEY),
-        url: gcpp_host.get_url(CppService::FSUploadFile, is_pri),
-        is_stream: false,
-        trace_id: Some(new_uuid_v4()),
-        is_pri,
+        url: ext_token.get_gcpp_host().get_url(CppService::FSUploadFile, use_pri),
+        stream: false,
+        compressed,
+        trace_id: new_uuid_v4(),
+        use_pri,
         cookie: headers.remove(COOKIE),
     });
 
-    let body = __unwrap!(encode_message(&request, false));
-
-    let mut e = match async { req.body(body).send().await }.await {
-        Ok(res) => {
-            let (mut parts, body) = http::Response::from(res).into_parts();
+    let mut e = match CollectBytesParts(req.body(data)).await {
+        Ok((mut parts, bytes)) => {
             for key in TO_REMOVE_HEADERS {
                 let _ = parts.headers.remove(key);
             }
-            match async {
-                http_body_util::BodyExt::collect(body)
-                    .await
-                    .map(|buf| buf.to_bytes())
-            }
-            .await
-            {
-                Ok(bytes) => {
-                    return match direct::decode::<FsUploadFileResponse>(&bytes) {
-                        Ok(DecodedMessage::Protobuf(data)) => Ok(Response::from_parts(
-                            parts,
-                            Body::from(__unwrap!(serde_json::to_vec(&data))),
-                        )),
-                        Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
-                            Response::builder()
-                                .header(CONTENT_TYPE, JSON)
-                                .header(CONTENT_LENGTH, s.len())
-                                .body(Body::from(s))
-                        )),
-                        Err(DecoderError::Internal(e)) => Err((
-                            StatusCode::BAD_GATEWAY,
-                            Json(ChatError::RequestFailed(Cow::Borrowed(e)).to_generic()),
-                        )
-                            .into_response()),
-                    };
-                }
-                Err(e) => e,
-            }
+            return match direct::decode::<FsUploadFileResponse>(&bytes) {
+                Ok(DecodedMessage::Protobuf(data)) => Ok(Response::from_parts(
+                    parts,
+                    Body::from(__unwrap!(serde_json::to_vec(&data))),
+                )),
+                Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
+                    Response::builder()
+                        .header(CONTENT_TYPE, JSON)
+                        .header(CONTENT_LENGTH, s.len())
+                        .body(Body::from(s))
+                )),
+                Err(DecoderError::Internal(e)) => Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ChatError::ProcessingFailed(Cow::Borrowed(e)).to_generic()),
+                )
+                    .into_response()),
+            };
         }
         Err(e) => e,
     };
@@ -218,10 +207,7 @@ pub async fn handle_upload_file(
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
-    Err((
-        status_code,
-        Json(ChatError::RequestFailed(Cow::Owned(e.to_string())).to_generic()),
-    )
+    Err((status_code, Json(ChatError::RequestFailed(Cow::Owned(e.to_string())).to_generic()))
         .into_response())
 }
 
@@ -230,57 +216,46 @@ pub async fn handle_sync_file(
     mut extensions: Extensions,
     Json(request): Json<FsSyncFileRequest>,
 ) -> Result<Response, Response> {
-    let (ext_token, is_pri) = extensions
-        .remove::<(ExtToken, bool)>()
-        .expect("middleware doesn't have `(ExtToken, bool)`");
-    let gcpp_host = ext_token.get_gcpp_host();
+    let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
+
+    let (data, compressed) = match encode_message(&request) {
+        Ok(o) => o,
+        Err(e) => return Err(e.into_response()),
+    };
 
     let req = build_client_request(AiServiceRequest {
-        ext_token,
+        ext_token: &ext_token,
         fs_client_key: headers.remove(CLIENT_KEY),
-        url: gcpp_host.get_url(CppService::FSSyncFile, is_pri),
-        is_stream: false,
-        trace_id: Some(new_uuid_v4()),
-        is_pri,
+        url: ext_token.get_gcpp_host().get_url(CppService::FSSyncFile, use_pri),
+        stream: false,
+        compressed,
+        trace_id: new_uuid_v4(),
+        use_pri,
         cookie: headers.remove(COOKIE),
     });
 
-    let body = __unwrap!(encode_message(&request, false));
-
-    let mut e = match async { req.body(body).send().await }.await {
-        Ok(res) => {
-            let (mut parts, body) = http::Response::from(res).into_parts();
+    let mut e = match CollectBytesParts(req.body(data)).await {
+        Ok((mut parts, bytes)) => {
             for key in TO_REMOVE_HEADERS {
                 let _ = parts.headers.remove(key);
             }
-            match async {
-                http_body_util::BodyExt::collect(body)
-                    .await
-                    .map(|buf| buf.to_bytes())
-            }
-            .await
-            {
-                Ok(bytes) => {
-                    return match direct::decode::<FsSyncFileResponse>(&bytes) {
-                        Ok(DecodedMessage::Protobuf(data)) => Ok(Response::from_parts(
-                            parts,
-                            Body::from(__unwrap!(serde_json::to_vec(&data))),
-                        )),
-                        Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
-                            Response::builder()
-                                .header(CONTENT_TYPE, JSON)
-                                .header(CONTENT_LENGTH, s.len())
-                                .body(Body::from(s))
-                        )),
-                        Err(DecoderError::Internal(e)) => Err((
-                            StatusCode::BAD_GATEWAY,
-                            Json(ChatError::RequestFailed(Cow::Borrowed(e)).to_generic()),
-                        )
-                            .into_response()),
-                    };
-                }
-                Err(e) => e,
-            }
+            return match direct::decode::<FsSyncFileResponse>(&bytes) {
+                Ok(DecodedMessage::Protobuf(data)) => Ok(Response::from_parts(
+                    parts,
+                    Body::from(__unwrap!(serde_json::to_vec(&data))),
+                )),
+                Ok(DecodedMessage::Text(s)) => Err(__unwrap!(
+                    Response::builder()
+                        .header(CONTENT_TYPE, JSON)
+                        .header(CONTENT_LENGTH, s.len())
+                        .body(Body::from(s))
+                )),
+                Err(DecoderError::Internal(e)) => Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ChatError::ProcessingFailed(Cow::Borrowed(e)).to_generic()),
+                )
+                    .into_response()),
+            };
         }
         Err(e) => e,
     };
@@ -290,10 +265,7 @@ pub async fn handle_sync_file(
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
-    Err((
-        status_code,
-        Json(ChatError::RequestFailed(Cow::Owned(e.to_string())).to_generic()),
-    )
+    Err((status_code, Json(ChatError::RequestFailed(Cow::Owned(e.to_string())).to_generic()))
         .into_response())
 }
 
@@ -302,29 +274,25 @@ pub async fn handle_stream_cpp(
     mut extensions: Extensions,
     Json(request): Json<StreamCppRequest>,
 ) -> Result<Response, (StatusCode, Json<GenericError>)> {
-    let (ext_token, is_pri) = extensions
-        .remove::<(ExtToken, bool)>()
-        .expect("middleware doesn't have `(ExtToken, bool)`");
-    let gcpp_host = ext_token.get_gcpp_host();
+    let (ext_token, use_pri) = __unwrap!(extensions.remove::<TokenBundle>());
+
+    let data = match encode_message_framed(&request) {
+        Ok(o) => o,
+        Err(e) => return Err(e.into_response_tuple()),
+    };
 
     let req = build_client_request(AiServiceRequest {
-        ext_token,
+        ext_token: &ext_token,
         fs_client_key: headers.remove(CLIENT_KEY),
-        url: gcpp_host.get_url(CppService::StreamCpp, is_pri),
-        is_stream: true,
-        trace_id: Some(new_uuid_v4()),
-        is_pri,
+        url: ext_token.get_gcpp_host().get_url(CppService::StreamCpp, use_pri),
+        stream: true,
+        compressed: true,
+        trace_id: new_uuid_v4(),
+        use_pri,
         cookie: headers.remove(COOKIE),
     });
 
-    let body = encode_message(&request, true).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ChatError::RequestFailed(Cow::Owned(e.to_string())).to_generic()),
-        )
-    })?;
-
-    let res = match async { req.body(body).send().await }.await {
+    let res = match req.body(data).send().await {
         Ok(r) => r,
         Err(mut e) => {
             e = e.without_url();
@@ -340,133 +308,56 @@ pub async fn handle_stream_cpp(
         }
     };
 
-    // 处理消息并生成响应数据的辅助函数
+    // SSE 事件格式化
+    #[inline]
+    fn format_sse_event(vector: &mut Vec<u8>, message: &StreamMessage) {
+        vector.extend_from_slice(b"event: ");
+        vector.extend_from_slice(message.type_name().as_bytes());
+        vector.extend_from_slice(b"\ndata: ");
+        let vector = {
+            let mut ser = serde_json::Serializer::new(vector);
+            __unwrap!(serde::Serialize::serialize(message, &mut ser));
+            ser.into_inner()
+        };
+        vector.extend_from_slice(b"\n\n");
+    }
+
     fn process_messages<I>(messages: impl IntoIterator<Item = I::Item, IntoIter = I>) -> Vec<u8>
-    where
-        I: Iterator<Item = StreamMessage>,
-    {
+    where I: Iterator<Item = StreamMessage> {
         let mut response_data = Vec::with_capacity(128);
-
         for message in messages {
-            let event = match message {
-                StreamMessage::ModelInfo { .. } => "model_info",
-                StreamMessage::RangeReplace { .. } => "range_replace",
-                StreamMessage::CursorPrediction { .. } => "cursor_prediction",
-                StreamMessage::Text { .. } => "text",
-                StreamMessage::DoneEdit => "done_edit",
-                StreamMessage::DoneStream => "done_stream",
-                StreamMessage::Debug { .. } => "debug",
-                StreamMessage::Error { .. } => ERROR,
-                StreamMessage::StreamEnd => "stream_end",
-            };
-            response_data.extend_from_slice(b"event: ");
-            response_data.extend_from_slice(event.as_bytes());
-            response_data.extend_from_slice(b"\ndata: ");
-            response_data.extend_from_slice(&__unwrap!(serde_json::to_vec(&message)));
-            response_data.extend_from_slice(b"\n\n");
+            format_sse_event(&mut response_data, &message);
         }
-
         response_data
     }
 
-    // 首先处理stream直到获得第一个结果
-    let mut stream = res.bytes_stream();
-    let decoder = Arc::new(Mutex::new(StreamDecoder::new()));
-    {
-        let mut decoder = decoder.lock().await;
-        while !decoder.is_first_result_ready() {
-            match stream.next().await {
-                Some(Ok(chunk)) => {
-                    if let Err(StreamError::Upstream(error)) = decoder.decode(&chunk) {
-                        let canonical = error.canonical();
-                        return Err((canonical.status_code(), Json(canonical.into_generic())));
-                    }
-                }
-                Some(Err(e)) => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            ChatError::RequestFailed(Cow::Owned(format!(
-                                "Failed to read response chunk: {e}"
-                            )))
-                            .to_generic(),
-                        ),
+    let mut decoder = StreamDecoder::new();
+
+    let stream = res.bytes_stream().map(move |chunk| {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(_) => return Ok::<_, Infallible>(Bytes::new()),
+        };
+
+        let messages = match decoder.decode(&chunk) {
+            Ok(msgs) => msgs,
+            Err(()) => {
+                let count = decoder.get_empty_stream_count();
+                if count > 1 {
+                    eprintln!("[警告] 连续空流: {count} 次");
+                    return Ok(Bytes::from_static(
+                        b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":533,\"type\":\"unknown\",\"details\":{\"title\":\"Empty\",\"detail\":\"Empty stream\"}}}\n\n",
                     ));
                 }
-                None => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            ChatError::RequestFailed(Cow::Borrowed(ERR_STREAM_RESPONSE))
-                                .to_generic(),
-                        ),
-                    ));
-                }
+                return Ok(Bytes::new());
             }
+        };
+
+        if messages.is_empty() {
+            return Ok(Bytes::new());
         }
-    }
 
-    let decoder_clone = decoder.clone();
-
-    // 处理后续的stream
-    let stream = stream.then(move |chunk| {
-        let decoder = decoder_clone.clone();
-        async move {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(_) => {
-                    // crate::debug_println!("Find chunk error: {e:?}");
-                    return Ok::<_, Infallible>(Bytes::new());
-                }
-            };
-
-            // 使用decoder处理chunk
-            let messages = match decoder.lock().await.decode(&chunk) {
-                Ok(msgs) => msgs,
-                Err(e) => {
-                    match e {
-                        // 处理普通空流错误
-                        StreamError::EmptyStream => {
-                            eprintln!(
-                                "[警告] Stream error: empty stream (连续计数: {})",
-                                decoder.lock().await.get_empty_stream_count()
-                            );
-                            return Ok(Bytes::new());
-                        }
-                        // 罕见
-                        StreamError::Upstream(e) => {
-                            __cold_path!();
-                            let message =
-                                __unwrap!(serde_json::to_string(&e.canonical().into_generic()));
-                            let messages = [StreamMessage::Error { message }];
-                            return Ok(Bytes::from(process_messages(messages)));
-                        }
-                        // 处理其他错误
-                        _ => {
-                            __cold_path!();
-                            eprintln!("[警告] Stream error: {e}");
-                            return Ok(Bytes::new());
-                        }
-                    }
-                }
-            };
-
-            let mut first_response = None;
-
-            if let Some(first_msg) = decoder.lock().await.take_first_result() {
-                first_response = Some(process_messages(first_msg));
-            }
-
-            let current_response = process_messages(messages);
-            let response_data = if let Some(mut first_response) = first_response {
-                first_response.extend_from_slice(&current_response);
-                first_response
-            } else {
-                current_response
-            };
-
-            Ok(Bytes::from(response_data))
-        }
+        Ok(Bytes::from(process_messages(messages)))
     });
 
     Ok(__unwrap!(

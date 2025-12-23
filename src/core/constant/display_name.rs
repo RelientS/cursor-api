@@ -1,13 +1,15 @@
-use ::ahash::HashMap;
-use ::parking_lot::Mutex;
+use parking_lot::Mutex;
+use manually_init::ManuallyInit;
 
-use crate::{app::constant::EMPTY_STRING, leak::manually_init::ManuallyInit};
+use crate::app::constant::EMPTY_STRING;
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
 
 static DISPLAY_NAME_CACHE: ManuallyInit<Mutex<HashMap<&'static str, &'static str>>> =
     ManuallyInit::new();
 
 pub fn init_display_name_cache() {
-    unsafe { DISPLAY_NAME_CACHE.init(Mutex::new(HashMap::default())) }
+    DISPLAY_NAME_CACHE.init(Mutex::new(HashMap::default()))
 }
 
 /// 计算 AI 模型标识符的显示名称。
@@ -89,9 +91,7 @@ use tokenizer::tokenize;
 fn calculate_display_name_internal(identifier: &'static str) -> String {
     let tokens = tokenize(identifier);
     let patterns = parse_patterns(tokens);
-    let result = format_output(patterns);
-
-    result
+    format_output(patterns)
 }
 
 #[cfg(test)]

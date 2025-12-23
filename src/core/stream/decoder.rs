@@ -3,20 +3,18 @@ pub mod direct;
 pub mod types;
 mod utils;
 
+// use core::sync::atomic::{AtomicU32, Ordering};
 use crate::core::{
-    aiserver::v1::{
-        StreamUnifiedChatResponseWithTools, WebReference, conversation_message::Thinking,
-    },
+    aiserver::v1::{StreamUnifiedChatResponseWithTools, WebReference},
     error::{CursorError, StreamError},
+    model::ToolId,
 };
-use bytes::{Buf as _, BytesMut};
-use flate2::read::GzDecoder;
+use alloc::borrow::Cow;
+use grpc_stream::{Buffer, RawMessage, decompress_gzip};
 use prost::Message as _;
-use std::{
-    io::Read as _,
-    // sync::atomic::{AtomicU32, Ordering},
-    time::Instant,
-};
+use std::time::Instant;
+
+const INCREMENTAL_COPY_THRESHOLD: usize = 64;
 
 pub trait InstantExt: Sized {
     fn duration_as_secs_f32(&mut self) -> f32;
@@ -32,51 +30,24 @@ impl InstantExt for Instant {
     }
 }
 
-// 解压gzip数据
-#[inline]
-fn decompress_gzip(data: &[u8]) -> Option<Vec<u8>> {
-    // 一个最小的 GZIP 文件需要 10 字节的头和 8 字节的尾，所以至少 18 字节。
-    if data.len() < 18
-        || unsafe {
-            *data.get_unchecked(0) != 0x1f
-                || *data.get_unchecked(1) != 0x8b
-                || *data.get_unchecked(2) != 0x08
-        }
-    {
-        return None;
-    }
+#[derive(Debug, PartialEq, Clone)]
+pub enum Thinking {
+    Text(String),
+    Signature(String),
+    RedactedThinking(String),
+}
 
-    let capacity = unsafe {
-        const SIZE: usize = 4;
-        let last_four_bytes_ptr = data.as_ptr().add(data.len() - SIZE);
-        let raw_isize = {
-            let mut tmp = ::core::mem::MaybeUninit::uninit();
-            // SAFETY: the caller must guarantee that `src` is valid for reads.
-            // `src` cannot overlap `tmp` because `tmp` was just allocated on
-            // the stack as a separate allocation.
-            //
-            // Also, since we just wrote a valid value into `tmp`, it is guaranteed
-            // to be properly initialized.
-            ::core::ptr::copy_nonoverlapping(last_four_bytes_ptr, tmp.as_mut_ptr() as *mut u8, SIZE);
-            tmp.assume_init()
-        };
-        u32::from_le(raw_isize) as usize
-    };
-
-    let mut decoder = GzDecoder::new(data);
-    let mut decompressed = Vec::with_capacity(capacity);
-
-    if decoder.read_to_end(&mut decompressed).is_ok() {
-        Some(decompressed)
-    } else {
-        None
-    }
+#[derive(Debug, PartialEq, Clone)]
+pub struct ToolCall {
+    pub id: ::prost::ByteStr,
+    pub name: ::prost::ByteStr,
+    pub input: String,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum StreamMessage {
     // 调试
-    Debug(String),
+    // Debug(String),
     // 网络引用
     WebReference(Vec<WebReference>),
     // 内容开始标志
@@ -86,6 +57,8 @@ pub enum StreamMessage {
     Thinking(Thinking),
     // 消息内容
     Content(String),
+    // 工具调用
+    ToolCall(ToolCall),
     // 流结束标志
     StreamEnd,
 }
@@ -108,10 +81,11 @@ impl StreamMessage {
 
                 let mut builder =
                     StringBuilder::with_capacity(parts_count).append("WebReferences:\n");
+                let mut buffer = itoa::Buffer::new();
 
                 for (i, web_ref) in refs.iter().enumerate() {
                     builder
-                        .append_mut((i + 1).to_string())
+                        .append_mut(buffer.format(i + 1).to_string())
                         .append_mut(". [")
                         .append_mut(&web_ref.title)
                         .append_mut("](")
@@ -130,37 +104,49 @@ impl StreamMessage {
     }
 }
 
+#[derive(Default)]
+struct Context {
+    raw_args_len: usize,
+    processed: bool,
+    // 调试使用
+    // counter: u32,
+}
+
 pub struct StreamDecoder {
     // 主要数据缓冲区 (32字节)
-    buffer: BytesMut,
+    buffer: Buffer,
     // 结果相关 (24字节 + 24字节 + 24字节)
     first_result: Option<Vec<StreamMessage>>,
     content_delays: Option<(String, Vec<(u32, f32)>)>,
     thinking_content: Option<String>,
     // 计数器和时间 (8字节 + 8字节)
+    context: Context,
     empty_stream_count: usize,
     last_content_time: Instant,
     // 状态标志 (1字节 + 1字节 + 1字节)
     first_result_ready: bool,
     first_result_taken: bool,
     has_seen_content: bool,
-    // 调试使用
-    // counter: AtomicU32,
 }
 
 impl StreamDecoder {
     pub fn new() -> Self {
+        // static COUNTER: AtomicU32 = AtomicU32::new(0);
         Self {
-            buffer: BytesMut::new(),
+            buffer: Buffer::with_capacity(64),
             first_result: None,
             content_delays: None,
             thinking_content: None,
+            context: Context {
+                raw_args_len: 0,
+                processed: false,
+                // counter: COUNTER.fetch_add(1, Ordering::SeqCst),
+            },
             empty_stream_count: 0,
             last_content_time: Instant::now(),
             first_result_ready: false,
             first_result_taken: false,
             has_seen_content: false,
-            // counter: AtomicU32::new(0),
         }
     }
 
@@ -193,13 +179,16 @@ impl StreamDecoder {
     pub fn is_first_result_ready(&self) -> bool { self.first_result_ready }
 
     #[inline]
+    pub fn is_tool_processed(&self) -> bool { self.context.processed }
+
+    #[inline]
     pub fn take_content_delays(&mut self) -> Option<(String, Vec<(u32, f32)>)> {
-        ::core::mem::take(&mut self.content_delays)
+        core::mem::take(&mut self.content_delays)
     }
 
     #[inline]
     pub fn take_thinking_content(&mut self) -> Option<String> {
-        ::core::mem::take(&mut self.thinking_content)
+        core::mem::take(&mut self.thinking_content)
     }
 
     #[inline]
@@ -214,128 +203,68 @@ impl StreamDecoder {
         data: &[u8],
         convert_web_ref: bool,
     ) -> Result<Vec<StreamMessage>, StreamError> {
-        if !data.is_empty() {
-            self.reset_empty_stream_count();
-        }
-
-        self.buffer.extend_from_slice(data);
-
-        if self.buffer.len() < 5 {
-            if self.buffer.is_empty() {
-                self.empty_stream_count += 1;
-
-                return Err(StreamError::EmptyStream);
-            }
-            crate::debug!("数据长度小于5字节，当前数据: {}", hex::encode(&self.buffer));
-            return Err(StreamError::DataLengthLessThan5);
+        if data.is_empty() || {
+            self.buffer.extend_from_slice(data);
+            self.buffer.len() < 5
+        } {
+            self.empty_stream_count += 1;
+            let arg = if self.buffer.is_empty() {
+                format_args!("为空")
+            } else {
+                format_args!(": {}", hex::encode(&self.buffer))
+            };
+            crate::debug!("数据长度小于5字节，当前数据{arg}");
+            return Err(StreamError::EmptyStream);
         }
 
         self.reset_empty_stream_count();
 
-        let reserve = {
-            let mut offset = 0;
-            let mut count = 0;
-            while offset + 5 <= self.buffer.len() {
-                let msg_len: usize;
-
-                // SAFETY: The loop condition `offset + 5 <= self.buffer.len()` guarantees
-                // that indices `offset` through `offset + 4` are within bounds.
-                unsafe {
-                    msg_len = u32::from_be_bytes([
-                        *self.buffer.get_unchecked(offset + 1),
-                        *self.buffer.get_unchecked(offset + 2),
-                        *self.buffer.get_unchecked(offset + 3),
-                        *self.buffer.get_unchecked(offset + 4),
-                    ]) as usize;
-                }
-
-                offset += 5;
-
-                if msg_len == 0 {
-                    continue;
-                }
-
-                if offset + msg_len > self.buffer.len() {
-                    // 最后一次循环 offset -= 5;
-                    break;
-                }
-
-                offset += msg_len;
-                count += 1;
-            }
-            count
-        };
+        let mut iter = (&self.buffer).into_iter();
+        let count = iter.len();
 
         if let Some(content_delays) = self.content_delays.as_mut() {
-            content_delays.0.reserve(reserve);
-            content_delays.1.reserve(reserve);
+            content_delays.1.reserve(count);
         } else {
-            self.content_delays =
-                Some((String::with_capacity(reserve), Vec::with_capacity(reserve)));
+            self.content_delays = Some((String::with_capacity(64), Vec::with_capacity(count)));
         }
 
-        let mut messages = Vec::with_capacity(reserve);
-        let mut offset = 0;
+        let mut messages = Vec::with_capacity(count + 1);
 
-        while offset + 5 <= self.buffer.len() {
-            let msg_type: u8;
-            let msg_len: usize;
-
-            // SAFETY: The loop condition `offset + 5 <= self.buffer.len()` guarantees
-            // that indices `offset` through `offset + 4` are within bounds.
-            unsafe {
-                msg_type = *self.buffer.get_unchecked(offset);
-                msg_len = u32::from_be_bytes([
-                    *self.buffer.get_unchecked(offset + 1),
-                    *self.buffer.get_unchecked(offset + 2),
-                    *self.buffer.get_unchecked(offset + 3),
-                    *self.buffer.get_unchecked(offset + 4),
-                ]) as usize;
-            }
-
-            offset += 5;
-
-            if msg_len == 0 {
+        while let Some(raw_msg) = iter.next() {
+            if raw_msg.data.is_empty() {
                 #[cfg(test)]
                 messages.push(StreamMessage::ContentStart);
                 continue;
             }
 
-            let expected_size = offset + msg_len;
-            if expected_size > self.buffer.len() {
-                offset -= 5;
-                break;
+            if self.context.processed {
+                crate::debug!("remaining: {} bytes", self.buffer.len() - iter.offset());
+                continue;
             }
-            let msg_data = unsafe { self.buffer.get_unchecked(offset..expected_size) };
 
-            if let Some(msg) = Self::process_message(msg_type, msg_data)? {
-                if let StreamMessage::Content(content) = &msg {
+            if let Some(msg) = Self::process_message(raw_msg, &mut self.context)? {
+                if let StreamMessage::Content(ref content) = msg {
                     self.has_seen_content = true;
                     let delay = self.last_content_time.duration_as_secs_f32();
                     let content_delays = __unwrap!(self.content_delays.as_mut());
                     content_delays.0.push_str(content);
-                    content_delays
-                        .1
-                        .push((content.chars().count() as u32, delay));
-                } else if let StreamMessage::Thinking(thinking) = &msg {
+                    content_delays.1.push((content.chars().count() as u32, delay));
+                } else if let StreamMessage::Thinking(Thinking::Text(ref text)) = msg {
                     if let Some(thinking_content) = self.thinking_content.as_mut() {
-                        thinking_content.push_str(&thinking.text);
+                        thinking_content.push_str(text);
                     } else {
-                        self.thinking_content = Some(thinking.text.clone());
+                        self.thinking_content = Some(text.clone());
                     }
                 }
-                let msg = if convert_web_ref {
-                    msg.convert_web_ref_to_content()
-                } else {
-                    msg
-                };
+                let msg = if convert_web_ref { msg.convert_web_ref_to_content() } else { msg };
                 messages.push(msg);
+                if self.context.processed {
+                    messages.push(StreamMessage::StreamEnd);
+                }
             }
-
-            offset += msg_len;
         }
 
-        self.buffer.advance(offset);
+        self.buffer.advance(iter.offset());
 
         if !self.first_result_taken && !messages.is_empty() {
             if self.first_result.is_none() {
@@ -347,82 +276,176 @@ impl StreamDecoder {
             }
         }
         if !self.first_result_ready {
-            self.first_result_ready = self.first_result.is_some()
-                && self.buffer.is_empty()
-                && !self.first_result_taken
-                && self.has_seen_content;
+            self.first_result_ready =
+                self.first_result.is_some() && !self.first_result_taken && self.has_seen_content;
         }
         Ok(messages)
     }
 
     #[inline]
     fn process_message(
-        msg_type: u8,
-        msg_data: &[u8],
+        raw_msg: RawMessage<'_>,
+        ctx: &mut Context,
     ) -> Result<Option<StreamMessage>, StreamError> {
-        match msg_type {
-            0 => Self::handle_text_message(msg_data),
-            1 => Self::handle_gzip_message(msg_data, Self::handle_text_message),
-            2 => Self::handle_json_message(msg_data),
-            3 => Self::handle_gzip_message(msg_data, Self::handle_json_message),
-            t => {
-                eprintln!("收到未知消息类型: {t}，请尝试联系开发者以获取支持");
-                crate::debug!("消息类型: {t}，消息内容: {}", hex::encode(msg_data));
+        let is_compressed = raw_msg.r#type & 1 != 0;
+        let t = raw_msg.r#type >> 1;
+        let msg_data = if is_compressed {
+            match decompress_gzip(raw_msg.data) {
+                Some(data) => Cow::Owned(data),
+                None => return Ok(None),
+            }
+        } else {
+            Cow::Borrowed(raw_msg.data)
+        };
+        let msg_data = &*msg_data;
+        let r = match t {
+            0 => Ok(Self::handle_text_message(msg_data, ctx)),
+            1 => Self::handle_json_message(msg_data),
+            _ => {
+                eprintln!("收到未知消息类型: {}，请尝试联系开发者以获取支持", raw_msg.r#type);
+                crate::debug!("消息类型: {}，消息内容: {}", raw_msg.r#type, hex::encode(msg_data));
                 Ok(None)
             }
-        }
+        };
+        // crate::debug!("{} {r:?}", ctx.counter);
+        r
     }
 
-    #[inline]
-    fn handle_text_message(msg_data: &[u8]) -> Result<Option<StreamMessage>, StreamError> {
+    fn handle_text_message(msg_data: &[u8], ctx: &mut Context) -> Option<StreamMessage> {
         // let count = self.counter.fetch_add(1, Ordering::SeqCst);
-        if let Ok(response) = StreamUnifiedChatResponseWithTools::decode(msg_data) {
+        if let Ok(wrapper) = StreamUnifiedChatResponseWithTools::decode(&*msg_data) {
             // crate::debug!("StreamUnifiedChatResponseWithTools [hex: {}]: {:#?}", hex::encode(msg_data), response);
             // crate::debug!("{count}: {response:?}");
-            if let Some(super::super::aiserver::v1::stream_unified_chat_response_with_tools::Response::StreamUnifiedChatResponse(response)) = response.response {
-                if !response.text.is_empty() {
-                    return Ok(Some(StreamMessage::Content(response.text)));
-                } else if let Some(thinking) = response.thinking {
-                    // if let Ok(s) = serde_json::to_string(&thinking) {
-                    //     crate::debug!("thinking ? = {s}");
-                    // }
-                    return Ok(Some(StreamMessage::Thinking(thinking)))
-                } else if let Some(filled_prompt) = response.filled_prompt {
-                    return Ok(Some(StreamMessage::Debug(filled_prompt)));
-                } else if let Some(web_citation) = response.web_citation {
-                    return Ok(Some(StreamMessage::WebReference(web_citation.references)));
+            if let Some(response) = wrapper.response {
+                use super::super::aiserver::v1::{
+                    client_side_tool_v2_call::Params,
+                    stream_unified_chat_response_with_tools::Response,
+                };
+                match response {
+                    Response::ClientSideToolV2Call(response) => {
+                        let mut result = None;
+
+                        if response.is_streaming {
+                            use core::cmp::Ordering;
+
+                            if !utils::has_space_after_separator(response.raw_args.as_bytes()) {
+                                return None;
+                            }
+
+                            let raw_args_len = response.raw_args.len();
+
+                            match raw_args_len.cmp(&ctx.raw_args_len) {
+                                Ordering::Greater => {
+                                    // 有新增数据，提取增量部分
+                                    let args = unsafe {
+                                        response.raw_args.get_unchecked(ctx.raw_args_len..)
+                                    };
+
+                                    if args.len() > INCREMENTAL_COPY_THRESHOLD {
+                                        __cold_path!();
+                                        // 大块数据：原地移动避免重新分配
+                                        let mut raw_args = response.raw_args;
+                                        let count = raw_args_len - ctx.raw_args_len;
+
+                                        unsafe {
+                                            let v = raw_args.as_mut_vec();
+                                            // SAFETY: the conditions for `ptr::copy` have all been checked above,
+                                            // as have those for `ptr::add`.
+                                            let ptr = v.as_mut_ptr();
+                                            let src_ptr = ptr.add(ctx.raw_args_len);
+                                            core::ptr::copy(src_ptr, ptr, count);
+                                            v.set_len(count);
+                                        }
+                                        result = Some(raw_args);
+                                    } else {
+                                        // 小块数据：直接克隆更快
+                                        result = Some(args.to_owned());
+                                    }
+
+                                    ctx.raw_args_len = raw_args_len;
+                                }
+
+                                Ordering::Equal => {
+                                    // 无新数据，跳过此次处理
+                                    return None;
+                                }
+
+                                Ordering::Less => {
+                                    __cold_path!();
+                                    eprintln!(
+                                        "Warning: raw_args_len decreased: {} < {} (possible stream reset)",
+                                        raw_args_len, ctx.raw_args_len
+                                    );
+                                    crate::debug!(
+                                        "Streaming length regression detected: \
+                                        raw_args={:?},
+                                        tool_call_id={}, model_call_id={}, \
+                                        expected_len={}, actual_len={}, \
+                                        delta={}, is_last={}",
+                                        response.raw_args,
+                                        response.tool_call_id,
+                                        response.model_call_id.as_deref().unwrap_or_default(),
+                                        ctx.raw_args_len,
+                                        raw_args_len,
+                                        ctx.raw_args_len as i64 - raw_args_len as i64,
+                                        response.is_last_message
+                                    );
+                                }
+                            }
+
+                            if response.is_last_message {
+                                ctx.processed = true;
+                            }
+                        } else {
+                            result = Some(response.raw_args);
+                            ctx.processed = true;
+                        }
+
+                        let id = ToolId::format(response.tool_call_id, response.model_call_id);
+                        let name = response
+                            .params
+                            .and_then(|ps| {
+                                let Params::McpParams(ps) = ps;
+                                ps.tools.into_iter().next()
+                            })
+                            .map(|tool| tool.name)
+                            .unwrap_or_default();
+
+                        return result
+                            .map(|input| StreamMessage::ToolCall(ToolCall { id, name, input }));
+                    }
+                    Response::StreamUnifiedChatResponse(response) => {
+                        if !response.text.is_empty() {
+                            return Some(StreamMessage::Content(response.text));
+                        } else if let Some(thinking) = response.thinking {
+                            return Some(StreamMessage::Thinking(thinking.into()));
+                        }
+                        // else if let Some(filled_prompt) = response.filled_prompt {
+                        //     return Some(StreamMessage::Debug(filled_prompt));
+                        // }
+                        else if let Some(web_citation) = response.web_citation {
+                            return Some(StreamMessage::WebReference(web_citation.references));
+                        }
+                    }
                 }
             }
         }
         // crate::debug!("{count}: {}", hex::encode(msg_data));
-        Ok(None)
+        None
     }
 
-    #[inline]
-    fn handle_gzip_message(
-        msg_data: &[u8],
-        f: fn(&[u8]) -> Result<Option<StreamMessage>, StreamError>,
-    ) -> Result<Option<StreamMessage>, StreamError> {
-        if let Some(msg_data) = decompress_gzip(msg_data) {
-            f(&msg_data)
-        } else {
-            Ok(None)
-        }
-    }
-
-    #[inline]
     fn handle_json_message(msg_data: &[u8]) -> Result<Option<StreamMessage>, StreamError> {
         if msg_data.len() == 2 {
             return Ok(Some(StreamMessage::StreamEnd));
         }
         // let count = self.counter.fetch_add(1, Ordering::SeqCst);
-        if let Some(text) = utils::string_from_utf8(msg_data) {
-            // crate::debug!("JSON消息 [hex: {}]: {}", hex::encode(msg_data), text);
-            // crate::debug!("{count}: {text:?}");
-            if let Ok(error) = ::serde_json::from_str::<CursorError>(&text) {
-                return Err(StreamError::Upstream(error));
-            }
+        // if let Some(text) = utils::string_from_utf8(msg_data) {
+        // crate::debug!("JSON消息 [hex: {}]: {}", hex::encode(msg_data), text);
+        // crate::debug!("{count}: {text:?}");
+        if let Ok(error) = CursorError::from_slice(msg_data) {
+            return Err(StreamError::Upstream(error));
         }
+        // }
         // crate::debug!("{count}: {}", hex::encode(msg_data));
         Ok(None)
     }
@@ -432,26 +455,34 @@ impl StreamDecoder {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test() {
+        unsafe {
+            std::env::set_var("DEBUG_LOG_FILE", "debug1.log");
+        }
+        crate::app::lazy::log::init();
+        let stream_data = include_str!("../../../tests/data/stream_data.txt");
+        let bytes = hex::decode(stream_data).unwrap();
+        let mut decoder = StreamDecoder::new().no_first_cache();
+
+        if let Err(e) = decoder.decode(&bytes, false) {
+            println!("解析错误: {e}");
+        }
+        if decoder.is_incomplete() {
+            println!("数据不完整");
+        }
+
+        tokio::time::sleep(std::time::Duration::new(3, 5)).await
+    }
+
     #[test]
     fn test_single_chunk() {
-        // 使用include_str!加载测试数据文件
         let stream_data = include_str!("../../../tests/data/stream_data.txt");
-
-        // 将整个字符串按每两个字符分割成字节
-        let bytes: Vec<u8> = stream_data
-            .as_bytes()
-            .chunks(2)
-            .map(|chunk| {
-                let hex_str = std::str::from_utf8(chunk).unwrap();
-                u8::from_str_radix(hex_str, 16).unwrap()
-            })
-            .collect();
-
-        // 创建解码器
+        let bytes = hex::decode(stream_data).unwrap();
         let mut decoder = StreamDecoder::new().no_first_cache();
 
         match decoder.decode(&bytes, false) {
-            Ok(messages) =>
+            Ok(messages) => {
                 for message in messages {
                     match message {
                         StreamMessage::StreamEnd => {
@@ -467,6 +498,9 @@ mod tests {
                         StreamMessage::Thinking(msg) => {
                             println!("思考: {msg:?}");
                         }
+                        StreamMessage::ToolCall(msg) => {
+                            println!("工具调用: {msg:?}");
+                        }
                         StreamMessage::WebReference(refs) => {
                             println!("网页引用:");
                             for (i, web_ref) in refs.iter().enumerate() {
@@ -476,14 +510,15 @@ mod tests {
                                 );
                             }
                         }
-                        StreamMessage::Debug(prompt) => {
-                            println!("调试信息: {prompt}");
-                        }
+                        // StreamMessage::Debug(prompt) => {
+                        //     println!("调试信息: {prompt}");
+                        // }
                         StreamMessage::ContentStart => {
                             println!("流开始");
                         }
                     }
-                },
+                }
+            }
             Err(e) => {
                 println!("解析错误: {e}");
             }
@@ -495,23 +530,10 @@ mod tests {
 
     #[test]
     fn test_multiple_chunks() {
-        // 使用include_str!加载测试数据文件
         let stream_data = include_str!("../../../tests/data/stream_data.txt");
-
-        // 将整个字符串按每两个字符分割成字节
-        let bytes: Vec<u8> = stream_data
-            .as_bytes()
-            .chunks(2)
-            .map(|chunk| {
-                let hex_str = std::str::from_utf8(chunk).unwrap();
-                u8::from_str_radix(hex_str, 16).unwrap()
-            })
-            .collect();
-
-        // 创建解码器
+        let bytes = hex::decode(stream_data).unwrap();
         let mut decoder = StreamDecoder::new().no_first_cache();
 
-        // 辅助函数：找到下一个消息边界
         fn find_next_message_boundary(bytes: &[u8]) -> usize {
             if bytes.len() < 5 {
                 return bytes.len();
@@ -520,16 +542,6 @@ mod tests {
             5 + msg_len
         }
 
-        // 辅助函数：将字节转换为hex字符串
-        fn bytes_to_hex(bytes: &[u8]) -> String {
-            bytes
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<String>>()
-                .join("")
-        }
-
-        // 多次解析数据
         let mut offset = 0;
         let mut should_break = false;
 
@@ -537,7 +549,7 @@ mod tests {
             let remaining_bytes = &bytes[offset..];
             let msg_boundary = find_next_message_boundary(remaining_bytes);
             let current_msg_bytes = &remaining_bytes[..msg_boundary];
-            let hex_str = bytes_to_hex(current_msg_bytes);
+            let hex_str = hex::encode(current_msg_bytes);
 
             match decoder.decode(current_msg_bytes, false) {
                 Ok(messages) => {
@@ -557,6 +569,9 @@ mod tests {
                             StreamMessage::Thinking(msg) => {
                                 println!("思考: {msg:?}");
                             }
+                            StreamMessage::ToolCall(msg) => {
+                                println!("工具调用: {msg:?}");
+                            }
                             StreamMessage::WebReference(refs) => {
                                 println!("网页引用 [hex: {hex_str}]:");
                                 for (i, web_ref) in refs.iter().enumerate() {
@@ -566,9 +581,9 @@ mod tests {
                                     );
                                 }
                             }
-                            StreamMessage::Debug(prompt) => {
-                                println!("调试信息 [hex: {hex_str}]: {prompt}");
-                            }
+                            // StreamMessage::Debug(prompt) => {
+                            //     println!("调试信息 [hex: {hex_str}]: {prompt}");
+                            // }
                             StreamMessage::ContentStart => {
                                 println!("流开始 [hex: {hex_str}]");
                             }

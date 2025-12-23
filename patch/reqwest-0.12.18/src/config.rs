@@ -41,18 +41,13 @@ pub(crate) trait RequestConfigValue: Copy + Clone + 'static {
 pub(crate) struct RequestConfig<T: RequestConfigValue>(Option<T::Value>);
 
 impl<T: RequestConfigValue> Default for RequestConfig<T> {
-    fn default() -> Self {
-        RequestConfig(None)
-    }
+    fn default() -> Self { RequestConfig(None) }
 }
 
 impl<T> RequestConfig<T>
-where
-    T: RequestConfigValue,
+where T: RequestConfigValue
 {
-    pub(crate) fn new(v: Option<T::Value>) -> Self {
-        RequestConfig(v)
-    }
+    pub(crate) fn new(v: Option<T::Value>) -> Self { RequestConfig(v) }
 
     /// format request config value as struct field.
     ///
@@ -73,9 +68,7 @@ where
     where
         'client: 'request,
     {
-        ext.get::<RequestConfig<T>>()
-            .and_then(|v| v.0.as_ref())
-            .or(self.0.as_ref())
+        ext.get::<RequestConfig<T>>().and_then(|v| v.0.as_ref()).or(self.0.as_ref())
     }
 
     /// Retrieve the value from the request's Extensions.
@@ -103,8 +96,8 @@ where
 // ================================
 
 #[derive(Clone, Copy)]
-pub(crate) struct RequestTimeout;
+pub(crate) struct TotalTimeout;
 
-impl RequestConfigValue for RequestTimeout {
+impl RequestConfigValue for TotalTimeout {
     type Value = Duration;
 }

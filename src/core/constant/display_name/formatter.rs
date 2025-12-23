@@ -1,5 +1,6 @@
+use alloc::borrow::Cow;
+
 use super::parser::{ParseResult, Pattern};
-use std::borrow::Cow;
 
 #[inline(always)]
 pub fn format_output(result: ParseResult) -> String {

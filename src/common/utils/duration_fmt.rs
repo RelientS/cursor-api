@@ -3,14 +3,14 @@
 //! A high-performance library for formatting time durations in various human-readable formats.
 //!
 //! This module provides flexible and localized duration formatting with multiple output styles
-//! and language options, optimized for minimal allocations.
+//! and language options, optimized for zero-allocation formatting.
 //!
 //! ## Features
 //!
 //! - Multiple formatting styles (compact, standard, detailed, ISO8601, etc.)
 //! - Multi-language support (English, Chinese, Japanese, Spanish, German)
 //! - Automatic format selection based on duration size
-//! - High performance with minimal allocations
+//! - Zero-allocation formatting with direct writes to output
 //!
 //! ## Examples
 //!
@@ -28,10 +28,10 @@
 //!     .language(Language::English));
 //! ```
 
-use rand::Rng as _;
-use std::{fmt, time::Duration};
+use core::fmt;
+use core::time::Duration;
 
-use super::string_builder::StringBuilder;
+use rand::Rng as _;
 
 /// Defines the display format for duration formatting.
 ///
@@ -118,7 +118,6 @@ crate::define_typed_constants! {
         SECONDS_PER_MINUTE = 60,
         SECONDS_PER_HOUR = 3600,
         SECONDS_PER_DAY = 86400,
-        // MILLIS_PER_SECOND = 1000,
     }
     u32 => {
         NANOS_PER_MILLI = 1_000_000,
@@ -175,12 +174,7 @@ impl UnitLocale {
         short: &'static str,
         fuzzy_prefix: &'static str,
     ) -> Self {
-        Self {
-            singular,
-            plural,
-            short,
-            fuzzy_prefix,
-        }
+        Self { singular, plural, short, fuzzy_prefix }
     }
 
     /// Creates a UnitLocale with the same form for singular and plural.
@@ -188,12 +182,7 @@ impl UnitLocale {
     /// Useful for languages like Chinese where the unit doesn't change for plural.
     #[inline(always)]
     const fn same(word: &'static str, short: &'static str, fuzzy_prefix: &'static str) -> Self {
-        Self {
-            singular: word,
-            plural: word,
-            short,
-            fuzzy_prefix,
-        }
+        Self { singular: word, plural: word, short, fuzzy_prefix }
     }
 }
 
@@ -304,6 +293,7 @@ crate::define_typed_constants! {
 ///     .format(DurationFormat::Detailed)
 ///     .language(Language::English));
 /// ```
+#[must_use = "this HumanDuration does nothing unless displayed or converted to a string"]
 pub struct HumanDuration {
     /// The wrapped Duration to be formatted
     duration: Duration,
@@ -333,13 +323,10 @@ impl HumanDuration {
     /// let duration = Duration::from_secs(65);
     /// let human_duration = HumanDuration::new(duration);
     /// ```
+    #[must_use]
     #[inline]
     pub const fn new(duration: Duration) -> Self {
-        Self {
-            duration,
-            format: DurationFormat::Auto,
-            language: Language::Chinese,
-        }
+        Self { duration, format: DurationFormat::Auto, language: Language::Chinese }
     }
 
     /// Sets the display format for this duration.
@@ -360,8 +347,9 @@ impl HumanDuration {
     ///
     /// let formatted = human(Duration::from_secs(65))
     ///     .format(DurationFormat::Compact);
-    /// assert_eq!(formatted.to_string(), "1m5s"); // In compact format
+    /// assert_eq!(formatted.to_string(), "1m5s");
     /// ```
+    #[must_use = "this returns a new value without modifying the original"]
     #[inline]
     pub const fn format(mut self, format: DurationFormat) -> Self {
         self.format = format;
@@ -389,6 +377,7 @@ impl HumanDuration {
     ///     .language(Language::English);
     /// assert_eq!(formatted.to_string(), "1 minute");
     /// ```
+    #[must_use = "this returns a new value without modifying the original"]
     #[inline]
     pub const fn language(mut self, language: Language) -> Self {
         self.language = language;
@@ -400,30 +389,25 @@ impl HumanDuration {
     /// Breaks the duration into days, hours, minutes, seconds, milliseconds, etc.
     #[inline]
     const fn get_parts(&self) -> TimeParts {
-        let total_secs = self.duration.as_secs();
-        let days = total_secs / SECONDS_PER_DAY;
-        let hours = (total_secs % SECONDS_PER_DAY) / SECONDS_PER_HOUR;
-        let minutes = (total_secs % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
-        let seconds = total_secs % SECONDS_PER_MINUTE;
-        let nanos = self.duration.subsec_nanos();
-        let millis = nanos / NANOS_PER_MILLI;
-        let micros = (nanos % NANOS_PER_MILLI) / NANOS_PER_MICRO;
+        let mut secs = self.duration.as_secs();
+        let days = secs / SECONDS_PER_DAY;
+        secs %= SECONDS_PER_DAY;
+        let hours = (secs / SECONDS_PER_HOUR) as u8;
+        secs %= SECONDS_PER_HOUR;
+        let minutes = (secs / SECONDS_PER_MINUTE) as u8;
+        let seconds = (secs % SECONDS_PER_MINUTE) as u8;
 
-        TimeParts {
-            days,
-            hours,
-            minutes,
-            seconds,
-            millis,
-            micros,
-            nanos,
-        }
+        let nanos = self.duration.subsec_nanos();
+        let millis = (nanos / NANOS_PER_MILLI) as u16;
+        let micros = ((nanos % NANOS_PER_MILLI) / NANOS_PER_MICRO) as u16;
+
+        TimeParts { days, hours, minutes, seconds, millis, micros, nanos }
     }
 
     /// Randomly selects a language for variety.
     ///
     /// Used when `Language::Random` is specified.
-    #[inline(never)] // 随机函数不应该内联，它们通常不在热路径上
+    #[inline(never)]
     fn random_language() -> Language {
         const LANGUAGES: &[Language] = &[
             Language::English,
@@ -448,7 +432,7 @@ impl HumanDuration {
     /// Gets the localization information for a time unit.
     ///
     /// Provides the appropriate strings for unit names based on the current language.
-    #[inline(always)] // 这是一个简单的查找表，应该总是内联
+    #[inline(always)]
     fn get_unit_locale(&self, unit: TimeUnit) -> &'static UnitLocale {
         use Language::*;
         use TimeUnit::*;
@@ -504,7 +488,7 @@ impl HumanDuration {
     /// Gets the appropriate unit string based on count and format.
     ///
     /// Returns singular, plural, or abbreviated form as appropriate.
-    #[inline(always)] // 简单的条件判断，应该总是内联
+    #[inline(always)]
     fn get_unit_str(&self, unit: TimeUnit, count: u64, short: bool) -> &'static str {
         let locale = self.get_unit_locale(unit);
         if short {
@@ -514,6 +498,27 @@ impl HumanDuration {
         } else {
             locale.singular
         }
+    }
+
+    /// Writes a number with zero-padding to the formatter.
+    ///
+    /// This is a helper function for numeric format that uses itoa with manual padding.
+    #[inline]
+    fn write_padded(
+        f: &mut fmt::Formatter<'_>,
+        buf: &mut itoa::Buffer,
+        value: u8,
+        width: usize,
+    ) -> fmt::Result {
+        let s = buf.format(value);
+        let len = s.len();
+
+        // Write leading zeros if needed
+        for _ in 0..(width.saturating_sub(len)) {
+            f.write_str("0")?;
+        }
+
+        f.write_str(s)
     }
 }
 
@@ -526,66 +531,22 @@ struct TimeParts {
     days: u64,
 
     /// Number of hours (0-23)
-    hours: u64,
+    hours: u8,
 
     /// Number of minutes (0-59)
-    minutes: u64,
+    minutes: u8,
 
     /// Number of seconds (0-59)
-    seconds: u64,
+    seconds: u8,
 
     /// Number of milliseconds (0-999)
-    millis: u32,
+    millis: u16,
 
     /// Number of microseconds (0-999)
-    micros: u32,
+    micros: u16,
 
     /// Total nanoseconds part (0-999,999,999)
     nanos: u32,
-}
-
-/// Display implementation for HumanDuration
-///
-/// This allows a HumanDuration to be formatted with `format!` or `to_string()`.
-impl fmt::Display for HumanDuration {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use DurationFormat::*;
-
-        // 如果是随机格式或随机语言，需要创建新的实例
-        if self.format == Random || self.language == Language::Random {
-            let actual_format = if self.format == Random {
-                Self::random_format()
-            } else {
-                self.format
-            };
-
-            let actual_language = if self.language == Language::Random {
-                Self::random_language()
-            } else {
-                self.language
-            };
-
-            return HumanDuration {
-                duration: self.duration,
-                format: actual_format,
-                language: actual_language,
-            }
-            .fmt(f);
-        }
-
-        match self.format {
-            Auto => self.fmt_auto(f),
-            Compact => self.fmt_compact(f),
-            Standard => self.fmt_standard(f),
-            Detailed => self.fmt_detailed(f),
-            ISO8601 => self.fmt_iso8601(f),
-            Fuzzy => self.fmt_fuzzy(f),
-            Numeric => self.fmt_numeric(f),
-            Verbose => self.fmt_verbose(f),
-            Random => __unreachable!(),
-        }
-    }
 }
 
 // 格式化实现
@@ -593,7 +554,7 @@ impl HumanDuration {
     /// Randomly selects a format for variety.
     ///
     /// Used when `DurationFormat::Random` is specified.
-    #[inline(never)] // 随机函数不应该内联
+    #[inline(never)]
     fn random_format() -> DurationFormat {
         const CANDIDATES: &[DurationFormat] = &[
             DurationFormat::Compact,
@@ -608,6 +569,278 @@ impl HumanDuration {
         unsafe { *CANDIDATES.get_unchecked(rand::rng().random_range(0..CANDIDATES.len())) }
     }
 
+    /// Formats the duration in Compact style: `1h2m3s`
+    ///
+    /// This format shows each non-zero time component with its abbreviated
+    /// unit indicator, without spaces between components.
+    fn fmt_compact(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = self.get_parts();
+        let mut buf = itoa::Buffer::new();
+        let mut written = false;
+
+        if parts.days > 0 {
+            f.write_str(buf.format(parts.days))?;
+            f.write_str(self.get_unit_str(TimeUnit::Day, parts.days, true))?;
+            written = true;
+        }
+        if parts.hours > 0 {
+            f.write_str(buf.format(parts.hours))?;
+            f.write_str(self.get_unit_str(TimeUnit::Hour, parts.hours as u64, true))?;
+            written = true;
+        }
+        if parts.minutes > 0 {
+            f.write_str(buf.format(parts.minutes))?;
+            f.write_str(self.get_unit_str(TimeUnit::Minute, parts.minutes as u64, true))?;
+            written = true;
+        }
+        if parts.seconds > 0 || !written {
+            f.write_str(buf.format(parts.seconds))?;
+            f.write_str(self.get_unit_str(TimeUnit::Second, parts.seconds as u64, true))?;
+        }
+
+        Ok(())
+    }
+
+    /// Formats the duration in Standard style: `1 hour 2 minutes 3 seconds`
+    ///
+    /// This format shows each non-zero time component with its full unit name,
+    /// separated by spaces.
+    fn fmt_standard(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = self.get_parts();
+        let mut buf = itoa::Buffer::new();
+        let mut first = true;
+
+        if parts.days > 0 {
+            f.write_str(buf.format(parts.days))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Day, parts.days, false))?;
+            first = false;
+        }
+        if parts.hours > 0 {
+            if !first {
+                f.write_str(" ")?;
+            }
+            f.write_str(buf.format(parts.hours))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Hour, parts.hours as u64, false))?;
+            first = false;
+        }
+        if parts.minutes > 0 {
+            if !first {
+                f.write_str(" ")?;
+            }
+            f.write_str(buf.format(parts.minutes))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Minute, parts.minutes as u64, false))?;
+            first = false;
+        }
+        if parts.seconds > 0 || first {
+            if !first {
+                f.write_str(" ")?;
+            }
+            f.write_str(buf.format(parts.seconds))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Second, parts.seconds as u64, false))?;
+        }
+
+        Ok(())
+    }
+
+    /// Formats the duration in Detailed style with separators between components
+    ///
+    /// This format is similar to Standard but adds appropriate separators
+    /// between components based on the selected language.
+    fn fmt_detailed(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = self.get_parts();
+        let mut buf = itoa::Buffer::new();
+        let separator = match self.get_actual_language() {
+            Language::Chinese | Language::Japanese => "、",
+            _ => ", ",
+        };
+        let mut first = true;
+
+        if parts.days > 0 {
+            f.write_str(buf.format(parts.days))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Day, parts.days, false))?;
+            first = false;
+        }
+        if parts.hours > 0 {
+            if !first {
+                f.write_str(separator)?;
+            }
+            f.write_str(buf.format(parts.hours))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Hour, parts.hours as u64, false))?;
+            first = false;
+        }
+        if parts.minutes > 0 {
+            if !first {
+                f.write_str(separator)?;
+            }
+            f.write_str(buf.format(parts.minutes))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Minute, parts.minutes as u64, false))?;
+            first = false;
+        }
+
+        // 秒+毫秒部分：使用 itoa + 手动格式化
+        if !first {
+            f.write_str(separator)?;
+        }
+        f.write_str(buf.format(parts.seconds))?;
+        f.write_str(".")?;
+        Self::write_padded(f, &mut buf, (parts.millis / 100) as u8, 1)?;
+        Self::write_padded(f, &mut buf, ((parts.millis / 10) % 10) as u8, 1)?;
+        Self::write_padded(f, &mut buf, (parts.millis % 10) as u8, 1)?;
+        f.write_str(" ")?;
+        f.write_str(self.get_unit_str(TimeUnit::Second, parts.seconds as u64, false))?;
+
+        Ok(())
+    }
+
+    /// Formats the duration in ISO 8601 style: `PT1H2M3S`
+    ///
+    /// Follows the international standard format for durations.
+    fn fmt_iso8601(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = self.get_parts();
+        let mut buf = itoa::Buffer::new();
+
+        f.write_str("P")?;
+
+        if parts.days > 0 {
+            f.write_str(buf.format(parts.days))?;
+            f.write_str("D")?;
+        }
+
+        if parts.hours > 0 || parts.minutes > 0 || parts.seconds > 0 {
+            f.write_str("T")?;
+            if parts.hours > 0 {
+                f.write_str(buf.format(parts.hours))?;
+                f.write_str("H")?;
+            }
+            if parts.minutes > 0 {
+                f.write_str(buf.format(parts.minutes))?;
+                f.write_str("M")?;
+            }
+            if parts.seconds > 0 {
+                f.write_str(buf.format(parts.seconds))?;
+                f.write_str("S")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Formats the duration in a fuzzy, human-friendly style: `about 5 minutes`
+    ///
+    /// Rounds to the most significant unit for a rough indication of time.
+    fn fmt_fuzzy(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let total_secs = self.duration.as_secs();
+        let mut buf = itoa::Buffer::new();
+        let prefix = self.get_unit_locale(TimeUnit::Second).fuzzy_prefix;
+
+        f.write_str(prefix)?;
+
+        if total_secs < 2 {
+            f.write_str("1 ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Second, 1, false))?;
+        } else if total_secs < 60 {
+            f.write_str(buf.format(total_secs))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Second, total_secs, false))?;
+        } else if total_secs < 120 {
+            f.write_str("1 ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Minute, 1, false))?;
+        } else if total_secs < SECONDS_PER_HOUR {
+            let minutes = (total_secs + 30) / 60;
+            f.write_str(buf.format(minutes))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Minute, minutes, false))?;
+        } else if total_secs < SECONDS_PER_HOUR * 2 {
+            f.write_str("1 ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Hour, 1, false))?;
+        } else if total_secs < SECONDS_PER_DAY {
+            let hours = (total_secs + 1800) / 3600;
+            f.write_str(buf.format(hours))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Hour, hours, false))?;
+        } else {
+            let days = (total_secs + 43200) / 86400;
+            f.write_str(buf.format(days))?;
+            f.write_str(" ")?;
+            f.write_str(self.get_unit_str(TimeUnit::Day, days, false))?;
+        }
+
+        Ok(())
+    }
+
+    /// Formats the duration in a numeric, clock-like style: `01:02:03.456`
+    ///
+    /// Shows the time components in a familiar digital clock format.
+    fn fmt_numeric(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = self.get_parts();
+        let mut buf = itoa::Buffer::new();
+
+        if parts.days > 0 {
+            f.write_str(buf.format(parts.days))?;
+            f.write_str(":")?;
+            Self::write_padded(f, &mut buf, parts.hours, 2)?;
+        } else {
+            Self::write_padded(f, &mut buf, parts.hours, 2)?;
+        }
+
+        f.write_str(":")?;
+        Self::write_padded(f, &mut buf, parts.minutes, 2)?;
+        f.write_str(":")?;
+        Self::write_padded(f, &mut buf, parts.seconds, 2)?;
+        f.write_str(".")?;
+
+        // 手动分解 millis 为三位数字
+        Self::write_padded(f, &mut buf, (parts.millis / 100) as u8, 1)?;
+        Self::write_padded(f, &mut buf, ((parts.millis / 10) % 10) as u8, 1)?;
+        Self::write_padded(f, &mut buf, (parts.millis % 10) as u8, 1)?;
+
+        Ok(())
+    }
+
+    /// Formats the duration in verbose style for debugging: `D:1 H:2 M:3 S:4 MS:567`
+    ///
+    /// Shows all time components with explicit labels, useful for debugging.
+    fn fmt_verbose(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = self.get_parts();
+        let mut buf = itoa::Buffer::new();
+        let mut first = true;
+
+        macro_rules! write_component {
+            ($val:expr, $label:expr) => {
+                if $val > 0 {
+                    if !first {
+                        f.write_str(" ")?;
+                    }
+                    f.write_str($label)?;
+                    f.write_str(":")?;
+                    f.write_str(buf.format($val))?;
+                    first = false;
+                }
+            };
+        }
+
+        write_component!(parts.days, "D");
+        write_component!(parts.hours, "H");
+        write_component!(parts.minutes, "M");
+        write_component!(parts.seconds, "S");
+        write_component!(parts.millis, "ms");
+        write_component!(parts.micros, "μs");
+        write_component!(parts.nanos, "ns");
+
+        if first {
+            f.write_str("0s")?;
+        }
+
+        Ok(())
+    }
+
     /// Formats the duration using the Auto format.
     ///
     /// Auto selects an appropriate format based on the duration's magnitude:
@@ -615,7 +848,6 @@ impl HumanDuration {
     /// - For durations with hours/minutes: uses the Compact format
     /// - For seconds: shows seconds with millisecond precision
     /// - For smaller durations: uses appropriate millisecond or microsecond units
-    #[inline(never)] // 复杂的格式化函数不应该内联，会增加代码大小
     fn fmt_auto(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let parts = self.get_parts();
 
@@ -624,386 +856,67 @@ impl HumanDuration {
         } else if parts.hours > 0 || parts.minutes > 0 {
             self.fmt_compact(f)
         } else if parts.seconds > 0 {
-            write!(
-                f,
-                "{}.{:03}{}",
-                parts.seconds,
-                parts.millis,
-                self.get_unit_str(TimeUnit::Second, parts.seconds, false)
-            )
+            let mut buf = itoa::Buffer::new();
+            f.write_str(buf.format(parts.seconds))?;
+            f.write_str(".")?;
+            Self::write_padded(f, &mut buf, (parts.millis / 100) as u8, 1)?;
+            Self::write_padded(f, &mut buf, ((parts.millis / 10) % 10) as u8, 1)?;
+            Self::write_padded(f, &mut buf, (parts.millis % 10) as u8, 1)?;
+            f.write_str(self.get_unit_str(TimeUnit::Second, parts.seconds as u64, false))
         } else if parts.millis > 0 {
-            write!(
-                f,
-                "{}{}",
-                parts.millis,
-                self.get_unit_str(TimeUnit::Millisecond, parts.millis as u64, false)
-            )
+            let mut buf = itoa::Buffer::new();
+            f.write_str(buf.format(parts.millis))?;
+            f.write_str(self.get_unit_str(TimeUnit::Millisecond, parts.millis as u64, false))
         } else if parts.micros > 0 {
-            write!(
-                f,
-                "{}{}",
-                parts.micros,
-                self.get_unit_str(TimeUnit::Microsecond, parts.micros as u64, false)
-            )
+            let mut buf = itoa::Buffer::new();
+            f.write_str(buf.format(parts.micros))?;
+            f.write_str(self.get_unit_str(TimeUnit::Microsecond, parts.micros as u64, false))
         } else {
-            write!(f, "0{}", self.get_unit_str(TimeUnit::Second, 0, false))
+            f.write_str("0")?;
+            f.write_str(self.get_unit_str(TimeUnit::Second, 0, false))
         }
     }
+}
 
-    /// Formats the duration in Compact style: `1h2m3s`
-    ///
-    /// This format shows each non-zero time component with its abbreviated
-    /// unit indicator, without spaces between components.
-    #[inline(never)] // 复杂的格式化函数
-    fn fmt_compact(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parts = self.get_parts();
-
-        // 计算最大可能的append调用次数：
-        // 每个组件最多有2次append (数字 + 单位)
-        // 4个可能的组件 (天, 小时, 分钟, 秒)
-        // 总共: 4 * 2 = 8次append
-        let mut builder = StringBuilder::with_capacity(8);
-
-        if parts.days > 0 {
-            let unit = self.get_unit_str(TimeUnit::Day, parts.days, true);
-            builder.append_mut(parts.days.to_string()).append_mut(unit);
-        }
-        if parts.hours > 0 {
-            let unit = self.get_unit_str(TimeUnit::Hour, parts.hours, true);
-            builder.append_mut(parts.hours.to_string()).append_mut(unit);
-        }
-        if parts.minutes > 0 {
-            let unit = self.get_unit_str(TimeUnit::Minute, parts.minutes, true);
-            builder
-                .append_mut(parts.minutes.to_string())
-                .append_mut(unit);
-        }
-        if parts.seconds > 0 || builder.is_empty() {
-            let unit = self.get_unit_str(TimeUnit::Second, parts.seconds, true);
-            builder
-                .append_mut(parts.seconds.to_string())
-                .append_mut(unit);
-        }
-
-        f.write_str(&builder.build())
-    }
-
-    /// Formats the duration in Standard style: `1 hour 2 minutes 3 seconds`
-    ///
-    /// This format shows each non-zero time component with its full unit name,
-    /// separated by spaces.
-    #[inline(never)] // 复杂的格式化函数
-    fn fmt_standard(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parts = self.get_parts();
-
-        // 计算最大可能的append调用次数：
-        // 每个组件最多有3次append (数字, 空格, 单位)
-        // 4个可能的组件 (天, 小时, 分钟, 秒)
-        // 组件之间的空格最多3次
-        // 总共: 4*3 + 3 = 15次append
-        let mut builder = StringBuilder::with_capacity(15);
-
-        if parts.days > 0 {
-            let unit = self.get_unit_str(TimeUnit::Day, parts.days, false);
-            builder
-                .append_mut(parts.days.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-        if parts.hours > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
+/// Display implementation for HumanDuration
+///
+/// This allows a HumanDuration to be formatted with `format!` or `to_string()`.
+impl fmt::Display for HumanDuration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Handle Random format and language resolution
+        match (self.format, self.language) {
+            (DurationFormat::Random, Language::Random) => HumanDuration {
+                duration: self.duration,
+                format: Self::random_format(),
+                language: Self::random_language(),
             }
-            let unit = self.get_unit_str(TimeUnit::Hour, parts.hours, false);
-            builder
-                .append_mut(parts.hours.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-        if parts.minutes > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
+            .fmt(f),
+            (DurationFormat::Random, lang) => HumanDuration {
+                duration: self.duration,
+                format: Self::random_format(),
+                language: lang,
             }
-            let unit = self.get_unit_str(TimeUnit::Minute, parts.minutes, false);
-            builder
-                .append_mut(parts.minutes.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-        if parts.seconds > 0 || builder.is_empty() {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
+            .fmt(f),
+            (fmt, Language::Random) => HumanDuration {
+                duration: self.duration,
+                format: fmt,
+                language: Self::random_language(),
             }
-            let unit = self.get_unit_str(TimeUnit::Second, parts.seconds, false);
-            builder
-                .append_mut(parts.seconds.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-
-        f.write_str(&builder.build())
-    }
-
-    /// Formats the duration in Detailed style with separators between components
-    ///
-    /// This format is similar to Standard but adds appropriate separators
-    /// between components based on the selected language.
-    #[inline(never)] // 复杂的格式化函数
-    fn fmt_detailed(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let separator = match self.get_actual_language() {
-            Language::Chinese | Language::Japanese => "、",
-            _ => ", ",
-        };
-
-        let parts = self.get_parts();
-
-        // 计算最大可能的append调用次数：
-        // 每个组件最多有3次append (数字, 空格, 单位)
-        // 4个可能的组件 (天, 小时, 分钟, 秒+毫秒)
-        // 组件之间的分隔符最多3次
-        // 总共: 4*3 + 3 = 15次append
-        let mut builder = StringBuilder::with_capacity(15);
-
-        if parts.days > 0 {
-            let unit = self.get_unit_str(TimeUnit::Day, parts.days, false);
-            builder
-                .append_mut(parts.days.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-        if parts.hours > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(separator);
+            .fmt(f),
+            _ => {
+                // Normal path without Random
+                match self.format {
+                    DurationFormat::Auto => self.fmt_auto(f),
+                    DurationFormat::Compact => self.fmt_compact(f),
+                    DurationFormat::Standard => self.fmt_standard(f),
+                    DurationFormat::Detailed => self.fmt_detailed(f),
+                    DurationFormat::ISO8601 => self.fmt_iso8601(f),
+                    DurationFormat::Fuzzy => self.fmt_fuzzy(f),
+                    DurationFormat::Numeric => self.fmt_numeric(f),
+                    DurationFormat::Verbose => self.fmt_verbose(f),
+                    DurationFormat::Random => unreachable!("Random should have been handled above"),
+                }
             }
-            let unit = self.get_unit_str(TimeUnit::Hour, parts.hours, false);
-            builder
-                .append_mut(parts.hours.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-        if parts.minutes > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(separator);
-            }
-            let unit = self.get_unit_str(TimeUnit::Minute, parts.minutes, false);
-            builder
-                .append_mut(parts.minutes.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-
-        // 格式化秒和毫秒
-        if !builder.is_empty() {
-            builder.append_mut(separator);
-        }
-
-        // 直接格式化秒和毫秒部分到StringBuilder
-        let seconds_str = format!("{}.{:03}", parts.seconds, parts.millis);
-        let unit = self.get_unit_str(TimeUnit::Second, parts.seconds, false);
-        builder
-            .append_mut(seconds_str)
-            .append_mut(" ")
-            .append_mut(unit);
-
-        f.write_str(&builder.build())
-    }
-
-    /// Formats the duration in ISO 8601 style: `PT1H2M3S`
-    ///
-    /// Follows the international standard format for durations.
-    #[inline] // ISO8601相对简单，可以内联
-    fn fmt_iso8601(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parts = self.get_parts();
-
-        // 计算最大可能的append调用次数：
-        // "P" + 可能的天 (数字+"D") + 可能的"T" +
-        // 可能的小时 (数字+"H") + 可能的分钟 (数字+"M") + 可能的秒 (数字+"S")
-        // 总共: 1 + 2 + 1 + 2 + 2 + 2 = 10次append
-        let mut builder = StringBuilder::with_capacity(10);
-
-        builder.append_mut("P");
-
-        if parts.days > 0 {
-            builder.append_mut(parts.days.to_string()).append_mut("D");
-        }
-
-        if parts.hours > 0 || parts.minutes > 0 || parts.seconds > 0 {
-            builder.append_mut("T");
-            if parts.hours > 0 {
-                builder.append_mut(parts.hours.to_string()).append_mut("H");
-            }
-            if parts.minutes > 0 {
-                builder
-                    .append_mut(parts.minutes.to_string())
-                    .append_mut("M");
-            }
-            if parts.seconds > 0 {
-                builder
-                    .append_mut(parts.seconds.to_string())
-                    .append_mut("S");
-            }
-        }
-
-        f.write_str(&builder.build())
-    }
-
-    /// Formats the duration in a fuzzy, human-friendly style: `about 5 minutes`
-    ///
-    /// Rounds to the most significant unit for a rough indication of time.
-    #[inline(never)] // 复杂的格式化函数
-    fn fmt_fuzzy(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let total_secs = self.duration.as_secs();
-        let locale_prefix = self.get_unit_locale(TimeUnit::Second).fuzzy_prefix;
-
-        // 计算最大可能的append调用次数：
-        // 前缀 + 数字 + 空格 + 单位
-        // 总共: 4次append
-        let mut builder = StringBuilder::with_capacity(4);
-
-        if total_secs < 2 {
-            let unit = self.get_unit_str(TimeUnit::Second, 1, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut("1 ")
-                .append_mut(unit);
-        } else if total_secs < 60 {
-            let unit = self.get_unit_str(TimeUnit::Second, total_secs, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut(total_secs.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        } else if total_secs < 120 {
-            let unit = self.get_unit_str(TimeUnit::Minute, 1, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut("1 ")
-                .append_mut(unit);
-        } else if total_secs < SECONDS_PER_HOUR {
-            let minutes = (total_secs + 30) / 60; // 四舍五入到分钟
-            let unit = self.get_unit_str(TimeUnit::Minute, minutes, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut(minutes.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        } else if total_secs < SECONDS_PER_HOUR * 2 {
-            let unit = self.get_unit_str(TimeUnit::Hour, 1, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut("1 ")
-                .append_mut(unit);
-        } else if total_secs < SECONDS_PER_DAY {
-            let hours = (total_secs + 1800) / 3600; // 四舍五入到小时
-            let unit = self.get_unit_str(TimeUnit::Hour, hours, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut(hours.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        } else {
-            let days = (total_secs + 43200) / 86400; // 四舍五入到天
-            let unit = self.get_unit_str(TimeUnit::Day, days, false);
-            builder
-                .append_mut(locale_prefix)
-                .append_mut(days.to_string())
-                .append_mut(" ")
-                .append_mut(unit);
-        }
-
-        f.write_str(&builder.build())
-    }
-
-    /// Formats the duration in a numeric, clock-like style: `01:02:03.456`
-    ///
-    /// Shows the time components in a familiar digital clock format.
-    #[inline] // 相对简单的格式化函数，可以内联
-    fn fmt_numeric(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parts = self.get_parts();
-
-        // 这个函数使用write!直接格式化到f更高效，保持原样
-        if parts.days > 0 {
-            write!(
-                f,
-                "{}:{:02}:{:02}:{:02}.{:03}",
-                parts.days, parts.hours, parts.minutes, parts.seconds, parts.millis
-            )
-        } else {
-            write!(
-                f,
-                "{:02}:{:02}:{:02}.{:03}",
-                parts.hours, parts.minutes, parts.seconds, parts.millis
-            )
-        }
-    }
-
-    /// Formats the duration in verbose style for debugging: `D:1 H:2 M:3 S:4 MS:567`
-    ///
-    /// Shows all time components with explicit labels, useful for debugging.
-    #[inline(never)] // 涉及Vec分配的复杂函数
-    fn fmt_verbose(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let parts = self.get_parts();
-
-        // 计算最大可能的append调用次数：
-        // 每个组件最多有 (标签 + 数字 + 可能的空格)
-        // 7个可能的组件 (天, 小时, 分钟, 秒, 毫秒, 微秒, 纳秒)
-        // 总共: 7 * 3 = 21次append
-        let mut builder = StringBuilder::with_capacity(21);
-
-        if parts.days > 0 {
-            builder.append_mut("D:").append_mut(parts.days.to_string());
-        }
-        if parts.hours > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
-            }
-            builder.append_mut("H:").append_mut(parts.hours.to_string());
-        }
-        if parts.minutes > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
-            }
-            builder
-                .append_mut("M:")
-                .append_mut(parts.minutes.to_string());
-        }
-        if parts.seconds > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
-            }
-            builder
-                .append_mut("S:")
-                .append_mut(parts.seconds.to_string());
-        }
-        if parts.millis > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
-            }
-            builder
-                .append_mut("ms:")
-                .append_mut(parts.millis.to_string());
-        }
-        if parts.micros > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
-            }
-            builder
-                .append_mut("μs:")
-                .append_mut(parts.micros.to_string());
-        }
-        if parts.nanos > 0 {
-            if !builder.is_empty() {
-                builder.append_mut(" ");
-            }
-            builder
-                .append_mut("ns:")
-                .append_mut(parts.nanos.to_string());
-        }
-
-        if builder.is_empty() {
-            f.write_str("0s")
-        } else {
-            f.write_str(&builder.build())
         }
     }
 }
@@ -1036,38 +949,36 @@ impl HumanDuration {
 ///     .format(DurationFormat::Compact)
 ///     .language(Language::English));
 /// ```
-#[inline(always)] // 简单的包装函数，应该总是内联
+#[must_use]
+#[inline(always)]
 pub const fn human(duration: Duration) -> HumanDuration { HumanDuration::new(duration) }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     #[test]
     fn test_compact_format() {
         let duration = Duration::from_secs(3662); // 1h 1m 2s
-        let formatted = human(duration)
-            .format(DurationFormat::Compact)
-            .language(Language::English);
+        let formatted = human(duration).format(DurationFormat::Compact).language(Language::English);
         assert_eq!(formatted.to_string(), "1h1m2s");
     }
 
     #[test]
     fn test_standard_format() {
         let duration = Duration::from_secs(3662); // 1h 1m 2s
-        let formatted = human(duration)
-            .format(DurationFormat::Standard)
-            .language(Language::English);
+        let formatted =
+            human(duration).format(DurationFormat::Standard).language(Language::English);
         assert_eq!(formatted.to_string(), "1 hour 1 minute 2 seconds");
     }
 
     #[test]
     fn test_detailed_format() {
         let duration = Duration::from_secs(3662); // 1h 1m 2s
-        let formatted = human(duration)
-            .format(DurationFormat::Detailed)
-            .language(Language::English);
+        let formatted =
+            human(duration).format(DurationFormat::Detailed).language(Language::English);
         assert_eq!(formatted.to_string(), "1 hour, 1 minute, 2.000 seconds");
     }
 
@@ -1081,24 +992,47 @@ mod tests {
     #[test]
     fn test_chinese_language() {
         let duration = Duration::from_secs(65); // 1m 5s
-        let formatted = human(duration)
-            .format(DurationFormat::Standard)
-            .language(Language::Chinese);
+        let formatted =
+            human(duration).format(DurationFormat::Standard).language(Language::Chinese);
         assert_eq!(formatted.to_string(), "1 分钟 5 秒");
     }
 
     #[test]
     fn test_fuzzy_format() {
         let duration = Duration::from_secs(50); // 50s
-        let formatted = human(duration)
-            .format(DurationFormat::Fuzzy)
-            .language(Language::English);
+        let formatted = human(duration).format(DurationFormat::Fuzzy).language(Language::English);
         assert_eq!(formatted.to_string(), "about 50 seconds");
 
         let duration = Duration::from_secs(3600); // 1h
-        let formatted = human(duration)
-            .format(DurationFormat::Fuzzy)
-            .language(Language::English);
+        let formatted = human(duration).format(DurationFormat::Fuzzy).language(Language::English);
         assert_eq!(formatted.to_string(), "about 1 hour");
+    }
+
+    #[test]
+    fn test_zero_duration() {
+        let duration = Duration::from_secs(0);
+        let formatted = human(duration).format(DurationFormat::Compact).language(Language::English);
+        assert_eq!(formatted.to_string(), "0s");
+    }
+
+    #[test]
+    fn test_verbose_format() {
+        let duration = Duration::from_millis(3662567); // 1h 1m 2s 567ms
+        let formatted = human(duration).format(DurationFormat::Verbose);
+        assert_eq!(formatted.to_string(), "H:1 M:1 S:2 ms:567");
+    }
+
+    #[test]
+    fn test_numeric_format() {
+        let duration = Duration::from_millis(3662567); // 1h 1m 2s 567ms
+        let formatted = human(duration).format(DurationFormat::Numeric);
+        assert_eq!(formatted.to_string(), "01:01:02.567");
+    }
+
+    #[test]
+    fn test_numeric_format_with_days() {
+        let duration = Duration::from_secs(90061); // 1d 1h 1m 1s
+        let formatted = human(duration).format(DurationFormat::Numeric);
+        assert_eq!(formatted.to_string(), "1:01:01:01.000");
     }
 }

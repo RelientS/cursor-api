@@ -1,477 +1,534 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use image::guess_format;
-use rand::Rng as _;
-use reqwest::Client;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use uuid::Uuid;
 
-use crate::{
-  app::{
-    constant::EMPTY_STRING,
-    lazy::get_default_instructions,
-    model::{AppConfig, VisionAbility, proxy_pool::get_general_client},
-  },
-  common::utils::encode_message,
-  core::{
-    aiserver::v1::{
-      AzureState, ClientSideToolV2, ComposerCapabilityRequest, ComposerExternalLink,
-      ConversationMessage, ConversationMessageHeader, CursorPosition, CursorRange, EnvironmentInfo,
-      ExplicitContext, ImageProto, ModelDetails, StreamUnifiedChatRequest,
-      StreamUnifiedChatRequestWithTools, composer_capability_request, conversation_message,
-      image_proto, mcp_params, stream_unified_chat_request,
-    },
-    constant::{ERR_UNSUPPORTED_GIF, ERR_UNSUPPORTED_IMAGE_FORMAT, LONG_CONTEXT_MODELS},
-    model::{
-      ExtModel, Role,
-      anthropic::{
-        ContentBlockParam, ImageSource, MediaType, MessageContent, MessageCreateParams,
-        MessageParam, SystemContent, Tool,
-      },
-    },
-  },
+use crate::app::constant::EMPTY_STRING;
+use crate::app::model::{AppConfig, DEFAULT_INSTRUCTIONS, VisionAbility, create_explicit_context};
+use crate::app::model::proxy_pool::get_general_client;
+use crate::common::utils::encode_message_framed;
+use crate::core::aiserver::v1::{
+    AzureState, ClientSideToolV2, ClientSideToolV2Call, ClientSideToolV2Result,
+    ComposerExternalLink, ConversationMessage, CursorPosition, CursorRange, EnvironmentInfo,
+    ImageProto, McpParams, McpResult, ModelDetails, StreamUnifiedChatRequest,
+    StreamUnifiedChatRequestWithTools, ToolResultError, conversation_message, image_proto,
+    mcp_params, stream_unified_chat_request,
 };
-
+use crate::core::constant::LONG_CONTEXT_MODELS;
+use crate::core::model::{ExtModel, Role, ToolId};
+use crate::core::model::anthropic::{
+    ContentBlockParam, ImageSource, MediaType, MessageContent, MessageCreateParams, MessageParam,
+    SystemContent, ToolResultContent, ToolResultContentBlock,
+};
 use super::{
-  AGENT_MODE_NAME, ASK_MODE_NAME, ERR_BASE64_ONLY, ERR_VISION_DISABLED, NEWLINE, ToOpt as _,
-  WEB_SEARCH_MODE, extract_external_links, extract_web_references_info, sanitize_tool_name,
+    AGENT_MODE_NAME, ASK_MODE_NAME, AdapterError, BaseUuid, Messages, NEWLINE, ToOpt as _,
+    WEB_SEARCH_MODE, extract_external_links, extract_web_references_info, sanitize_tool_name,
 };
 
 async fn process_message_params(
-  messages: Vec<MessageParam>,
-  system: Option<SystemContent>,
-  tools: Vec<Tool>,
-  supported_tools: Vec<i32>,
-  now_with_tz: chrono::DateTime<chrono_tz::Tz>,
-  image_support: bool,
-  is_agentic: bool,
-) -> Result<
-  (
-    String,
-    Vec<ConversationMessage>,
-    Vec<ConversationMessageHeader>,
-    Vec<ComposerExternalLink>,
-  ),
-  Box<dyn std::error::Error + Send + Sync>,
-> {
-  // 收集 system 指令
-  let instructions = system.map(|content| match content {
-    SystemContent::String(text) => text,
-    SystemContent::Array(contents) => contents
-      .into_iter()
-      .map(|c| c.text)
-      .collect::<Vec<String>>()
-      .join(NEWLINE),
-  });
-
-  // 使用默认指令或收集到的指令
-  let instructions = if let Some(instructions) = instructions {
-    instructions
-  } else {
-    get_default_instructions(now_with_tz)
-  };
-
-  let mut inputs = messages;
-
-  // 处理空对话情况
-  if inputs.is_empty() {
-    let bubble_id = Uuid::new_v4().to_string();
-    return Ok((
-      instructions,
-      vec![ConversationMessage {
-        r#type: conversation_message::MessageType::Human as i32,
-        bubble_id: bubble_id.clone(),
-        unified_mode: Some(stream_unified_chat_request::UnifiedMode::Chat as i32),
-        is_simple_looping_message: Some(false),
-        ..Default::default()
-      }],
-      vec![ConversationMessageHeader {
-        bubble_id,
-        server_bubble_id: None,
-        r#type: conversation_message::MessageType::Human as i32,
-      }],
-      vec![],
-    ));
-  }
-
-  // 如果第一条是 assistant，插入空的 user 消息
-  if inputs
-    .first()
-    .is_some_and(|input| input.role == Role::Assistant)
-  {
-    inputs.insert(0, MessageParam {
-      role: Role::User,
-      content: MessageContent::String(EMPTY_STRING.into()),
+    mut inputs: Vec<MessageParam>,
+    system: Option<SystemContent>,
+    supported_tools: Vec<i32>,
+    now_with_tz: chrono::DateTime<chrono_tz::Tz>,
+    image_support: bool,
+    is_agentic: bool,
+) -> Result<(String, Messages, Vec<ComposerExternalLink>), AdapterError> {
+    // 收集 system 指令
+    let instructions = system.map(|content| match content {
+        SystemContent::String(text) => text,
+        SystemContent::Array(contents) => {
+            contents.into_iter().map(|c| c.text).collect::<Vec<String>>().join(NEWLINE)
+        }
     });
-  }
 
-  // 确保最后一条是 user
-  if inputs
-    .last()
-    .is_some_and(|input| input.role == Role::Assistant)
-  {
-    inputs.push(MessageParam {
-      role: Role::User,
-      content: MessageContent::String(EMPTY_STRING.into()),
-    });
-  }
+    // 使用默认指令或收集到的指令
+    let instructions = if let Some(instructions) = instructions {
+        instructions
+    } else {
+        DEFAULT_INSTRUCTIONS.get().get(now_with_tz)
+    };
 
-  // 转换为 proto messages
-  let mut messages = Vec::new();
-  let mut messages_headers = Vec::new();
-  let mut base_uuid = rand::rng().random_range(256u16..384);
+    // 处理空对话情况
+    if inputs.is_empty() {
+        return Ok((
+            instructions,
+            Messages::from_single(ConversationMessage {
+                r#type: conversation_message::MessageType::Human as i32,
+                bubble_id: Uuid::new_v4().to_string().into(),
+                unified_mode: Some(stream_unified_chat_request::UnifiedMode::Chat as i32),
+                // is_simple_looping_message: Some(false),
+                ..Default::default()
+            }),
+            vec![],
+        ));
+    }
 
-  for input in inputs {
-    let (text, images, all_thinking_blocks) = match input.content {
-      MessageContent::String(text) => (text, vec![], vec![]),
-      MessageContent::Array(contents) if input.role == Role::User => {
-        let mut text_parts = Vec::new();
-        let mut images = Vec::new();
+    // 如果第一条是 assistant，插入空的 user 消息
+    if inputs.first().is_some_and(|input| input.role == Role::Assistant) {
+        inputs.insert(
+            0,
+            MessageParam { role: Role::User, content: MessageContent::String(EMPTY_STRING.into()) },
+        );
+    }
 
-        for content in contents {
-          match content {
-            ContentBlockParam::Text { text } => text_parts.push(text),
-            ContentBlockParam::Image { source } => {
-              if image_support {
-                let res = {
-                  let vision_ability = AppConfig::get_vision_ability();
+    // 确保最后一条是 user
+    // if inputs.last().is_some_and(|input| input.role == Role::Assistant) {
+    //     inputs.push(MessageParam {
+    //         role: Role::User,
+    //         content: MessageContent::String(EMPTY_STRING.into()),
+    //     });
+    // }
 
-                  match vision_ability {
-                    VisionAbility::None => Err(ERR_VISION_DISABLED.into()),
-                    VisionAbility::Base64 => match source {
-                      ImageSource::Base64 { media_type, data } =>
-                        process_base64_image(media_type, &data),
-                      ImageSource::Url { .. } => Err(ERR_BASE64_ONLY.into()),
-                    },
-                    VisionAbility::All => match source {
-                      ImageSource::Base64 { media_type, data } =>
-                        process_base64_image(media_type, &data),
-                      ImageSource::Url { url } =>
-                        tokio::spawn(
-                          async move { process_http_image(&url, get_general_client()).await },
-                        )
-                        .await?,
-                    },
-                  }
-                };
-                match res {
-                  Ok((image_data, dimension)) => {
-                    images.push(ImageProto {
-                      data: image_data,
-                      dimension,
-                      uuid: {
-                        let s = base_uuid.to_string();
-                        base_uuid = base_uuid.wrapping_add(1);
-                        s
-                      },
-                      // task_specific_description: None,
-                    });
-                  }
-                  Err(e) => return Err(e),
+    // 转换为 proto messages
+    let mut messages = Messages::with_capacity(inputs.len());
+    let mut base_uuid = BaseUuid::new();
+    let mut inputs = inputs.into_iter().peekable();
+
+    while let Some(input) = inputs.next() {
+        let (text, images, thinking, next) = match input.content {
+            MessageContent::String(text) => (text, vec![], vec![], None),
+            MessageContent::Array(contents) if input.role == Role::User => {
+                let text_parts_len = contents
+                    .iter()
+                    .filter(|c| matches!(**c, ContentBlockParam::Text { .. }))
+                    .count();
+                let images_len = if image_support { contents.len() - text_parts_len } else { 0 };
+                let mut text_parts = Vec::with_capacity(text_parts_len);
+                let mut images = Vec::with_capacity(images_len);
+
+                for content in contents {
+                    match content {
+                        ContentBlockParam::Text { text } => text_parts.push(text),
+                        ContentBlockParam::Image { source } => {
+                            if image_support {
+                                let res = {
+                                    let vision_ability = AppConfig::get_vision_ability();
+
+                                    match vision_ability {
+                                        VisionAbility::None => Err(AdapterError::VisionDisabled),
+                                        VisionAbility::Base64 => match source {
+                                            ImageSource::Base64 { media_type, data } => {
+                                                process_base64_image(media_type, &data)
+                                            }
+                                            ImageSource::Url { .. } => {
+                                                Err(AdapterError::Base64Only)
+                                            }
+                                        },
+                                        VisionAbility::All => match source {
+                                            ImageSource::Base64 { media_type, data } => {
+                                                process_base64_image(media_type, &data)
+                                            }
+                                            ImageSource::Url { url } => {
+                                                super::process_http_image(
+                                                    &url,
+                                                    get_general_client(),
+                                                )
+                                                .await
+                                            }
+                                        },
+                                    }
+                                };
+                                match res {
+                                    Ok((image_data, dimension)) => {
+                                        images.push(ImageProto {
+                                            data: image_data,
+                                            dimension,
+                                            uuid: base_uuid.add_and_to_string(),
+                                            // task_specific_description: None,
+                                        });
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-              }
+
+                (text_parts.join(NEWLINE), images, vec![], None)
             }
-            _ => {}
-          }
-        }
+            MessageContent::Array(mut contents) if input.role == Role::Assistant => {
+                let mut text_parts = Vec::new();
+                let mut all_thinking_blocks = Vec::new();
+                let mut next = None;
 
-        (text_parts.join(NEWLINE), images, vec![])
-      }
-      MessageContent::Array(contents) if input.role == Role::Assistant => {
-        let mut text_parts = Vec::new();
-        let mut all_thinking_blocks = Vec::new();
-        let last = contents.len() - 1;
+                if matches!(contents.last(), Some(ContentBlockParam::ToolUse { .. }))
+                    && let ContentBlockParam::ToolUse { id, name, input } =
+                        __unwrap!(contents.pop())
+                    && let Some(peek_input) = inputs.peek()
+                    && peek_input.role == Role::User
+                    && let MessageContent::Array(ref contents) = peek_input.content
+                    && contents.len() == 1
+                    && matches!(contents[0], ContentBlockParam::ToolResult { .. })
+                    && let MessageContent::Array(contents) = __unwrap!(inputs.next()).content
+                    && let ContentBlockParam::ToolResult { tool_use_id, content, is_error } =
+                        __unwrap!(contents.into_iter().next())
+                {
+                    let tool_name: prost::ByteStr =
+                        format!("mcp_{}_{name}", sanitize_tool_name(&name)).into();
+                    let (text, images) = match content {
+                        None => (String::new(), vec![]),
+                        Some(content) => {
+                            match content {
+                                ToolResultContent::String(text) => (text, vec![]),
+                                ToolResultContent::Array(contents) => {
+                                    let text_parts_len = contents
+                                        .iter()
+                                        .filter(|c| {
+                                            matches!(**c, ToolResultContentBlock::Text { .. })
+                                        })
+                                        .count();
+                                    let images_len = if image_support {
+                                        contents.len() - text_parts_len
+                                    } else {
+                                        0
+                                    };
+                                    let mut text_parts = Vec::with_capacity(text_parts_len);
+                                    let mut images = Vec::with_capacity(images_len);
+                                    for content in contents {
+                                        match content {
+                                            ToolResultContentBlock::Text { text } => {
+                                                text_parts.push(text)
+                                            }
+                                            ToolResultContentBlock::Image { source } => {
+                                                if image_support {
+                                                    let res = {
+                                                        let vision_ability =
+                                                            AppConfig::get_vision_ability();
 
-        for (index, content) in contents.into_iter().enumerate() {
-          match content {
-            ContentBlockParam::Text { text } => {
-              text_parts.push(text);
+                                                        match vision_ability {
+                                                            VisionAbility::None => {
+                                                                Err(AdapterError::VisionDisabled)
+                                                            }
+                                                            VisionAbility::Base64 => match source {
+                                                                ImageSource::Base64 {
+                                                                    media_type,
+                                                                    data,
+                                                                } => process_base64_image(
+                                                                    media_type, &data,
+                                                                ),
+                                                                ImageSource::Url { .. } => {
+                                                                    Err(AdapterError::Base64Only)
+                                                                }
+                                                            },
+                                                            VisionAbility::All => match source {
+                                                                ImageSource::Base64 {
+                                                                    media_type,
+                                                                    data,
+                                                                } => process_base64_image(
+                                                                    media_type, &data,
+                                                                ),
+                                                                ImageSource::Url { url } => {
+                                                                    super::process_http_image(
+                                                                        &url,
+                                                                        get_general_client(),
+                                                                    )
+                                                                    .await
+                                                                }
+                                                            },
+                                                        }
+                                                    };
+                                                    match res {
+                                                        Ok((image_data, dimension)) => {
+                                                            images.push(ImageProto {
+                                                                data: image_data,
+                                                                dimension,
+                                                                uuid: base_uuid.add_and_to_string(),
+                                                                // task_specific_description: None,
+                                                            });
+                                                        }
+                                                        Err(e) => return Err(e),
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    (text_parts.join(NEWLINE), images)
+                                }
+                            }
+                        }
+                    };
+                    let text: prost::ByteStr = text.into();
+                    let tool_id = ToolId::parse(tool_use_id);
+                    let (result, error) = if is_error {
+                        let error =
+                            Some(ToolResultError { model_visible_error_message: text.clone() });
+                        (
+                            Some(ClientSideToolV2Result {
+                                tool: ClientSideToolV2::Mcp as i32,
+                                tool_call_id: tool_id.tool_call_id.clone(),
+                                error: error.clone(),
+                                model_call_id: tool_id.model_call_id.clone(),
+                                tool_index: Some(1),
+                                result: Some(Result::McpResult(McpResult {
+                                    selected_tool: name.clone(),
+                                    result: text,
+                                })),
+                            }),
+                            error,
+                        )
+                    } else {
+                        (
+                            Some(ClientSideToolV2Result {
+                                tool: ClientSideToolV2::Mcp as i32,
+                                tool_call_id: tool_id.tool_call_id.clone(),
+                                error: None,
+                                model_call_id: tool_id.model_call_id.clone(),
+                                tool_index: Some(1),
+                                result: Some(Result::McpResult(McpResult {
+                                    selected_tool: name.clone(),
+                                    result: text,
+                                })),
+                            }),
+                            None,
+                        )
+                    };
+                    use crate::core::aiserver::v1::client_side_tool_v2_call::Params;
+                    use crate::core::aiserver::v1::client_side_tool_v2_result::Result;
+                    use crate::core::aiserver::v1::conversation_message::ToolResult;
+                    let raw_args: prost::ByteStr = __unwrap!(serde_json::to_string(&input)).into();
+                    let tool_call = Some(ClientSideToolV2Call {
+                        tool: ClientSideToolV2::Mcp as i32,
+                        tool_call_id: id,
+                        name: tool_name.clone(),
+                        tool_index: Some(1),
+                        params: Some(Params::McpParams(McpParams {
+                            tools: vec![mcp_params::Tool {
+                                name,
+                                parameters: raw_args.clone(),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    });
+                    let result = ToolResult {
+                        tool_call_id: tool_id.tool_call_id,
+                        tool_name,
+                        tool_index: 1,
+                        model_call_id: tool_id.model_call_id,
+                        raw_args,
+                        result,
+                        error,
+                        images,
+                        tool_call,
+                    };
+                    next = Some(ConversationMessage {
+                        r#type: conversation_message::MessageType::Ai as i32,
+                        bubble_id: Uuid::new_v4().to_string().into(),
+                        server_bubble_id: Some(Uuid::new_v4().to_string().into()),
+                        tool_results: vec![result],
+                        unified_mode: Some(if is_agentic {
+                            stream_unified_chat_request::UnifiedMode::Agent
+                        } else {
+                            stream_unified_chat_request::UnifiedMode::Chat
+                        } as i32),
+                        ..Default::default()
+                    });
+                }
+
+                for content in contents {
+                    match content {
+                        ContentBlockParam::Text { text } => {
+                            text_parts.push(text);
+                        }
+                        ContentBlockParam::Thinking { thinking, signature } => {
+                            all_thinking_blocks.push(conversation_message::Thinking {
+                                text: thinking,
+                                signature,
+                                redacted_thinking: String::new(),
+                            });
+                        }
+                        ContentBlockParam::RedactedThinking { data } => {
+                            all_thinking_blocks.push(conversation_message::Thinking {
+                                text: String::new(),
+                                signature: String::new(),
+                                redacted_thinking: data,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                (text_parts.join(NEWLINE), vec![], all_thinking_blocks, next)
             }
-            ContentBlockParam::Thinking {
-              thinking,
-              signature,
-            } => {
-              all_thinking_blocks.push(conversation_message::Thinking {
-                text: thinking,
-                signature,
-                redacted_thinking: String::new(),
-                is_last_thinking_chunk: index == last,
-              });
+            _ => __unreachable!(),
+        };
+
+        // 处理消息内容和相关字段
+        let (final_text, web_references, use_web, external_links) = match input.role {
+            Role::Assistant => {
+                let (text, web_refs, has_web) = extract_web_references_info(text);
+                (text, web_refs, has_web.to_opt(), vec![])
             }
-            ContentBlockParam::RedactedThinking { data } => {
-              all_thinking_blocks.push(conversation_message::Thinking {
-                text: String::new(),
-                signature: String::new(),
-                redacted_thinking: data,
-                is_last_thinking_chunk: index == last,
-              });
+            Role::User => {
+                let external_links = extract_external_links(&text, &mut base_uuid);
+                (text, vec![], None, external_links)
             }
-            _ => {}
-          }
-        }
+            _ => __unreachable!(),
+        };
 
-        (text_parts.join(NEWLINE), vec![], all_thinking_blocks)
-      }
-      _ => __unreachable!(),
-    };
+        let is_user = input.role == Role::User;
+        let r#type = if is_user {
+            conversation_message::MessageType::Human as i32
+        } else {
+            conversation_message::MessageType::Ai as i32
+        };
 
-    // 处理消息内容和相关字段
-    let (final_text, web_references, use_web, external_links) = match input.role {
-      Role::Assistant => {
-        let (text, web_refs, has_web) = extract_web_references_info(&text);
-        (text, web_refs, has_web.to_opt(), vec![])
-      }
-      Role::User => {
-        let external_links = extract_external_links(&text, &mut base_uuid);
-        (text, vec![], None, external_links)
-      }
-      _ => __unreachable!(),
-    };
-
-    let r#type = if input.role == Role::User {
-      conversation_message::MessageType::Human as i32
-    } else {
-      conversation_message::MessageType::Ai as i32
-    };
-    let bubble_id = Uuid::new_v4().to_string();
-    let server_bubble_id = if input.role == Role::User {
-      None
-    } else {
-      Some(Uuid::new_v4().to_string())
-    };
-
-    messages.push(ConversationMessage {
-      text: final_text,
-      r#type,
-      images,
-      bubble_id: bubble_id.clone(),
-      server_bubble_id: server_bubble_id.clone(),
-      tool_results: vec![],
-      is_capability_iteration: Some(is_agentic),
-      is_agentic,
-      web_references,
-      thinking: match all_thinking_blocks.len() {
-        0 => None,
-        1 => Some(all_thinking_blocks[0].clone()),
-        _ => Some(conversation_message::Thinking {
-          text: all_thinking_blocks
-            .iter()
-            .map(|t| t.text.as_str())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(EMPTY_STRING),
-          signature: String::new(),
-          redacted_thinking: String::new(),
-          is_last_thinking_chunk: true,
-        }),
-      },
-      all_thinking_blocks,
-      unified_mode: Some(if is_agentic { stream_unified_chat_request::UnifiedMode::Agent } else { stream_unified_chat_request::UnifiedMode::Chat } as i32),
-      supported_tools: vec![],
-      external_links,
-      use_web,
-      is_simple_looping_message: Some(false),
-      ..Default::default()
-    });
-    messages_headers.push(ConversationMessageHeader {
-      bubble_id,
-      server_bubble_id,
-      r#type,
-    });
-  }
-
-  // 获取最后一条用户消息的URLs
-  let external_links = messages
-    .last_mut()
-    .map(|msg| {
-      msg.capabilities = tools
-        .into_iter()
-        .map(|t| ComposerCapabilityRequest {
-          r#type: composer_capability_request::ComposerCapabilityType::ToolCall as i32,
-          data: Some(composer_capability_request::Data::ToolCall(
-            composer_capability_request::ToolCallCapability {
-              custom_instructions: t.description,
-              tool_schemas: vec![composer_capability_request::ToolSchema {
-                r#type: composer_capability_request::ToolType::Unspecified as i32,
-                name: t.name,
-                properties: unsafe {
-                  ::core::intrinsics::transmute_unchecked(t.input_schema.properties)
-                },
-                required: t.input_schema.required,
-              }],
+        messages.push(ConversationMessage {
+            text: final_text,
+            r#type,
+            images,
+            bubble_id: Uuid::new_v4().to_string().into(),
+            server_bubble_id: if is_user { None } else { Some(Uuid::new_v4().to_string().into()) },
+            tool_results: vec![],
+            is_agentic: is_agentic && is_user,
+            web_references,
+            thinking: match thinking.len() {
+                0 => None,
+                1 => thinking.into_iter().next(),
+                _ => Some(conversation_message::Thinking {
+                    text: thinking
+                        .into_iter()
+                        .map(|t| t.text)
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(EMPTY_STRING),
+                    signature: String::new(),
+                    redacted_thinking: String::new(),
+                }),
             },
-          )),
-        })
-        .collect();
-      msg.supported_tools = supported_tools;
-      msg.external_links.clone()
-    })
-    .unwrap_or_default();
+            unified_mode: Some(if is_agentic {
+                stream_unified_chat_request::UnifiedMode::Agent
+            } else {
+                stream_unified_chat_request::UnifiedMode::Chat
+            } as i32),
+            supported_tools: vec![],
+            external_links,
+            use_web,
+            // is_simple_looping_message: Some(false),
+        });
 
-  Ok((instructions, messages, messages_headers, external_links))
+        if let Some(next) = next {
+            messages.push(next);
+        }
+    }
+
+    // 获取最后一条用户消息的URLs
+    let external_links = messages
+        .last_mut()
+        .map(|msg| {
+            msg.supported_tools = supported_tools;
+            msg.external_links.clone()
+        })
+        .unwrap_or_default();
+
+    Ok((instructions, messages, external_links))
 }
 
 /// 处理 base64 编码的图片
 fn process_base64_image(
-  media_type: MediaType,
-  data: &str,
-) -> Result<(Vec<u8>, Option<image_proto::Dimension>), Box<dyn std::error::Error + Send + Sync>> {
-  // 检查图片格式是否支持
-  match media_type {
-    MediaType::ImagePng | MediaType::ImageJpeg | MediaType::ImageWebp => {
-      // 这些格式都支持
-    }
-    MediaType::ImageGif => {
-      // GIF 需要额外检查是否为动态图
-    }
-  }
+    media_type: MediaType,
+    data: &str,
+) -> Result<(bytes::Bytes, Option<image_proto::Dimension>), AdapterError> {
+    let image_data = BASE64.decode(data).map_err(|_| AdapterError::Base64DecodeFailed)?;
+    let format = match media_type {
+        MediaType::ImagePng => image::ImageFormat::Png,
+        MediaType::ImageJpeg => image::ImageFormat::Jpeg,
+        MediaType::ImageGif => image::ImageFormat::Gif,
+        MediaType::ImageWebp => image::ImageFormat::WebP,
+    };
 
-  let image_data = BASE64.decode(data)?;
-
-  // 检查是否为动态 GIF
-  if matches!(media_type, MediaType::ImageGif)
-    && let Ok(frames) = gif::DecodeOptions::new().read_info(std::io::Cursor::new(&image_data))
-    && frames.into_iter().nth(1).is_some()
-  {
-    return Err(ERR_UNSUPPORTED_GIF.into());
-  }
-
-  // 获取图片尺寸
-  let dimensions = if let Ok(img) = image::load_from_memory(&image_data) {
-    Some(image_proto::Dimension {
-      width: img.width() as i32,
-      height: img.height() as i32,
-    })
-  } else {
-    None
-  };
-
-  Ok((image_data, dimensions))
-}
-
-// 处理 HTTP 图片 URL
-async fn process_http_image(
-  url: &str,
-  client: Client,
-) -> Result<(Vec<u8>, Option<image_proto::Dimension>), Box<dyn std::error::Error + Send + Sync>> {
-  let response = client.get(url).send().await?;
-  let image_data = response.bytes().await?.to_vec();
-  let format = guess_format(&image_data)?;
-
-  // 检查图片格式
-  match format {
-    image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP => {
-      // 这些格式都支持
-    }
-    image::ImageFormat::Gif => {
-      if let Ok(frames) = gif::DecodeOptions::new().read_info(std::io::Cursor::new(&image_data))
+    // 检查是否为动态 GIF
+    if format == image::ImageFormat::Gif
+        && let Ok(frames) = gif::DecodeOptions::new().read_info(std::io::Cursor::new(&image_data))
         && frames.into_iter().nth(1).is_some()
-      {
-        return Err(ERR_UNSUPPORTED_GIF.into());
-      }
+    {
+        return Err(AdapterError::UnsupportedAnimatedGif);
     }
-    _ => return Err(ERR_UNSUPPORTED_IMAGE_FORMAT.into()),
-  }
 
-  // 获取图片尺寸
-  let dimensions = if let Ok(img) = image::load_from_memory_with_format(&image_data, format) {
-    Some(image_proto::Dimension {
-      width: img.width() as i32,
-      height: img.height() as i32,
-    })
-  } else {
-    None
-  };
+    // 获取图片尺寸
+    let dimensions = image::load_from_memory_with_format(&image_data, format)
+        .ok()
+        .and_then(|img| img.try_into().ok());
 
-  Ok((image_data, dimensions))
+    Ok((image_data.into(), dimensions))
 }
 
-pub async fn encode_message_params(
-  params: MessageCreateParams,
-  now_with_tz: chrono::DateTime<chrono_tz::Tz>,
-  model: ExtModel,
-  msg_id: Uuid,
-  disable_vision: bool,
-  enable_slow_pool: bool,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-  let is_chat = params.tools.is_empty();
-  let is_agentic = !is_chat;
-  let supported_tools = if is_agentic {
-    vec![ClientSideToolV2::Mcp as i32]
-  } else {
-    vec![]
-  };
+pub async fn encode_create_params(
+    params: MessageCreateParams,
+    now_with_tz: chrono::DateTime<chrono_tz::Tz>,
+    model: ExtModel,
+    msg_id: Uuid,
+    environment_info: EnvironmentInfo,
+    disable_vision: bool,
+    enable_slow_pool: bool,
+) -> Result<Vec<u8>, AdapterError> {
+    let is_chat = params.tools.is_empty();
+    let is_agentic = !is_chat;
+    let supported_tools = if is_agentic { vec![ClientSideToolV2::Mcp as i32] } else { vec![] };
 
-  let (instructions, messages, messages_headers, external_links) = process_message_params(
-    params.messages,
-    params.system,
-    params.tools.clone(),
-    supported_tools.clone(),
-    now_with_tz,
-    !disable_vision && model.is_image,
-    is_agentic,
-  )
-  .await?;
+    let (instructions, messages, external_links) = process_message_params(
+        params.messages,
+        params.system,
+        supported_tools.clone(),
+        now_with_tz,
+        !disable_vision && model.is_image,
+        is_agentic,
+    )
+    .await?;
 
-  let explicit_context = if !instructions.trim().is_empty() {
-    Some(ExplicitContext {
-      context: instructions,
-      repo_context: None,
-      rules: vec![],
-      mode_specific_context: None,
-    })
-  } else {
-    None
-  };
+    let explicit_context = create_explicit_context(instructions.into());
 
-  let long_context = AppConfig::get_long_context() || LONG_CONTEXT_MODELS.contains(&model.id);
+    let long_context = AppConfig::get_long_context() || LONG_CONTEXT_MODELS.contains(&model.id);
 
-  let message = StreamUnifiedChatRequestWithTools {
+    let message = StreamUnifiedChatRequestWithTools {
         request: Some(crate::core::aiserver::v1::stream_unified_chat_request_with_tools::Request::StreamUnifiedChatRequest(Box::new(StreamUnifiedChatRequest {
-            conversation: messages,
-            full_conversation_headers_only: messages_headers,
+            conversation: messages.inner,
+            full_conversation_headers_only: messages.headers,
             // allow_long_file_scan: Some(false),
             explicit_context,
             // can_handle_filenames_after_language_ids: Some(false),
             model_details: Some(ModelDetails {
-                model_name: Some(model.id.to_string()),
+                model_name: Some(model.id()),
                 azure_state: Some(AzureState::default()),
                 enable_slow_pool: enable_slow_pool.to_opt(),
                 max_mode: Some(model.max),
             }),
             use_web: if model.web {
-                Some(WEB_SEARCH_MODE.to_string())
+                Some(::prost::ByteStr::from_static(WEB_SEARCH_MODE))
             } else {
                 None
             },
             external_links,
-            should_cache: Some(false),
+            should_cache: Some(true),
             current_file: Some(crate::core::aiserver::v1::CurrentFileInfo {
                 contents_start_at_line: 1,
-                cursor_position: Some(CursorPosition { line: 0, column: 0 }),
+                cursor_position: Some(CursorPosition::default()),
                 total_number_of_lines: 1,
                 selection: Some(CursorRange {
-                    start_position: Some(CursorPosition { line: 0, column: 0 }),
-                    end_position: Some(CursorPosition { line: 0, column: 0 }),
+                    start_position: Some(CursorPosition::default()),
+                    end_position: Some(CursorPosition::default()),
                 }),
+                ..Default::default()
             }),
-            use_reference_composer_diff_prompt: Some(false),
-            use_new_compression_scheme: Some(false),
+            // use_reference_composer_diff_prompt: Some(false),
+            use_new_compression_scheme: Some(true),
             is_chat,
             conversation_id: msg_id.to_string(),
-            environment_info: Some(EnvironmentInfo::default()),
+            environment_info: Some(environment_info),
             is_agentic,
             supported_tools: supported_tools.clone(),
             mcp_tools: params.tools.into_iter().map(|t| mcp_params::Tool {
                 server_name: sanitize_tool_name(&t.name),
-                name: t.name,
+                name: t.name.into(),
                 description: t.description.unwrap_or_default(),
-                parameters: __unwrap!(serde_json::to_string(&t.input_schema))
+                parameters: __unwrap!(serde_json::to_string(&t.input_schema)).into()
             }).collect(),
             use_full_inputs_context: long_context.to_opt(),
-            is_resume: Some(false),
+            // is_resume: Some(false),
             allow_model_fallbacks: Some(false),
-            number_of_times_shown_fallback_model_warning: Some(0),
+            // number_of_times_shown_fallback_model_warning: Some(0),
             unified_mode: Some(if is_agentic { stream_unified_chat_request::UnifiedMode::Agent } else { stream_unified_chat_request::UnifiedMode::Chat } as i32),
-            tools_requiring_accepted_return: supported_tools,
+            // tools_requiring_accepted_return: supported_tools,
             should_disable_tools: Some(is_chat),
             thinking_level: Some(if model.is_thinking {
                 stream_unified_chat_request::ThinkingLevel::High
@@ -479,10 +536,10 @@ pub async fn encode_message_params(
                 stream_unified_chat_request::ThinkingLevel::Unspecified
             } as i32),
             uses_rules: Some(false),
-            mode_uses_auto_apply: Some(false),
-            unified_mode_name: Some(if is_chat { ASK_MODE_NAME } else { AGENT_MODE_NAME }.to_string()),
+            // mode_uses_auto_apply: Some(false),
+            unified_mode_name: Some(::prost::ByteStr::from_static(if is_chat { ASK_MODE_NAME } else { AGENT_MODE_NAME })),
         })))
     };
 
-  encode_message(&message, true)
+    encode_message_framed(&message).map_err(Into::into)
 }

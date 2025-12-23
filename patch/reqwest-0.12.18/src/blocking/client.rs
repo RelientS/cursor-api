@@ -1,25 +1,24 @@
 #[cfg(any(feature = "native-tls", feature = "__rustls",))]
 use std::any::Any;
 use std::convert::TryInto;
-use std::fmt;
+use std::{fmt, thread};
 use std::future::Future;
-use std::net::IpAddr;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::task::{ready, Poll};
-use std::thread;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use http::header::HeaderValue;
 use log::{error, trace};
 use tokio::sync::{mpsc, oneshot};
-use tower::Layer;
-use tower::Service;
+use tower::{Layer, Service};
 
 use super::request::{Request, RequestBuilder};
 use super::response::Response;
 use super::wait;
 use crate::connect::sealed::{Conn, Unnameable};
+#[cfg(unix)]
+use crate::connect::uds::UnixSocketProvider;
 use crate::connect::BoxedConnectorService;
 use crate::dns::Resolve;
 use crate::error::BoxError;
@@ -31,7 +30,7 @@ use crate::tls::CertificateRevocationList;
 use crate::Certificate;
 #[cfg(any(feature = "native-tls", feature = "__rustls"))]
 use crate::Identity;
-use crate::{async_impl, header, redirect, IntoUrl, Method, Proxy};
+use crate::{IntoUrl, Method, Proxy, async_impl, header, redirect};
 
 /// A `Client` to make Requests with.
 ///
@@ -91,10 +90,7 @@ impl ClientBuilder {
     ///
     /// This is the same as `Client::builder()`.
     pub fn new() -> Self {
-        ClientBuilder {
-            inner: async_impl::ClientBuilder::new(),
-            timeout: Timeout::default(),
-        }
+        ClientBuilder { inner: async_impl::ClientBuilder::new(), timeout: Timeout::default() }
     }
 }
 
@@ -340,6 +336,13 @@ impl ClientBuilder {
         self.with_inner(move |inner| inner.redirect(policy))
     }
 
+    /// Set a request retry policy.
+    ///
+    /// Default behavior is to retry protocol NACKs.
+    pub fn retry(self, policy: crate::retry::Builder) -> ClientBuilder {
+        self.with_inner(move |inner| inner.retry(policy))
+    }
+
     /// Enable or disable automatic setting of the `Referer` header.
     ///
     /// Default is `true`.
@@ -527,6 +530,105 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http3_prior_knowledge())
     }
 
+    /// Maximum duration of inactivity to accept before timing out the QUIC connection.
+    ///
+    /// Please see docs in [`TransportConfig`] in [`quinn`].
+    ///
+    /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_max_idle_timeout(self, value: Duration) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_max_idle_timeout(value))
+    }
+
+    /// Maximum number of bytes the peer may transmit without acknowledgement on any one stream
+    /// before becoming blocked.
+    ///
+    /// Please see docs in [`TransportConfig`] in [`quinn`].
+    ///
+    /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is over 2^62.
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_stream_receive_window(self, value: u64) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_stream_receive_window(value))
+    }
+
+    /// Maximum number of bytes the peer may transmit across all streams of a connection before
+    /// becoming blocked.
+    ///
+    /// Please see docs in [`TransportConfig`] in [`quinn`].
+    ///
+    /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is over 2^62.
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_conn_receive_window(self, value: u64) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_conn_receive_window(value))
+    }
+
+    /// Maximum number of bytes to transmit to a peer without acknowledgment
+    ///
+    /// Please see docs in [`TransportConfig`] in [`quinn`].
+    ///
+    /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_send_window(self, value: u64) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_send_window(value))
+    }
+
+    /// Override the default congestion control algorithm to use [BBR]
+    ///
+    /// The current default congestion control algorithm is [CUBIC]. This method overrides the
+    /// default.
+    ///
+    /// [BBR]: https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr
+    /// [CUBIC]: https://datatracker.ietf.org/doc/html/rfc8312
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_congestion_bbr(self) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_congestion_bbr())
+    }
+
+    /// Set the maximum HTTP/3 header size this client is willing to accept.
+    ///
+    /// See [header size constraints] section of the specification for details.
+    ///
+    /// [header size constraints]: https://www.rfc-editor.org/rfc/rfc9114.html#name-header-size-constraints
+    ///
+    /// Please see docs in [`Builder`] in [`h3`].
+    ///
+    /// [`Builder`]: https://docs.rs/h3/latest/h3/client/struct.Builder.html#method.max_field_section_size
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_max_field_section_size(self, value: u64) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_max_field_section_size(value))
+    }
+
+    /// Enable whether to send HTTP/3 protocol grease on the connections.
+    ///
+    /// HTTP/3 uses the concept of "grease"
+    ///
+    /// to prevent potential interoperability issues in the future.
+    /// In HTTP/3, the concept of grease is used to ensure that the protocol can evolve
+    /// and accommodate future changes without breaking existing implementations.
+    ///
+    /// Please see docs in [`Builder`] in [`h3`].
+    ///
+    /// [`Builder`]: https://docs.rs/h3/latest/h3/client/struct.Builder.html#method.send_grease
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
+    pub fn http3_send_grease(self, enabled: bool) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_send_grease(enabled))
+    }
+
     // TCP options
 
     /// Set whether sockets have `TCP_NODELAY` enabled.
@@ -624,6 +726,24 @@ impl ClientBuilder {
         self.with_inner(move |inner| inner.tcp_user_timeout(val))
     }
 
+    // Alt Transports
+
+    /// Set that all connections will use this Unix socket.
+    ///
+    /// If a request URI uses the `https` scheme, TLS will still be used over
+    /// the Unix socket.
+    ///
+    /// # Note
+    ///
+    /// This option is not compatible with any of the TCP or Proxy options.
+    /// Setting this will ignore all those options previously set.
+    ///
+    /// Likewise, DNS resolution will not be done on the domain name.
+    #[cfg(unix)]
+    pub fn unix_socket(self, path: impl UnixSocketProvider) -> ClientBuilder {
+        self.with_inner(move |inner| inner.unix_socket(path))
+    }
+
     // TLS options
 
     /// Add a custom root certificate.
@@ -660,11 +780,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn add_root_certificate(self, cert: Certificate) -> ClientBuilder {
         self.with_inner(move |inner| inner.add_root_certificate(cert))
@@ -708,11 +824,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn tls_built_in_root_certs(self, tls_built_in_root_certs: bool) -> ClientBuilder {
         self.with_inner(move |inner| inner.tls_built_in_root_certs(tls_built_in_root_certs))
@@ -766,11 +878,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn danger_accept_invalid_hostnames(self, accept_invalid_hostname: bool) -> ClientBuilder {
         self.with_inner(|inner| inner.danger_accept_invalid_hostnames(accept_invalid_hostname))
@@ -790,11 +898,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn danger_accept_invalid_certs(self, accept_invalid_certs: bool) -> ClientBuilder {
         self.with_inner(|inner| inner.danger_accept_invalid_certs(accept_invalid_certs))
@@ -806,11 +910,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn tls_sni(self, tls_sni: bool) -> ClientBuilder {
         self.with_inner(|inner| inner.tls_sni(tls_sni))
@@ -834,11 +934,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn min_tls_version(self, version: tls::Version) -> ClientBuilder {
         self.with_inner(|inner| inner.min_tls_version(version))
@@ -862,11 +958,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn max_tls_version(self, version: tls::Version) -> ClientBuilder {
         self.with_inner(|inner| inner.max_tls_version(version))
@@ -909,11 +1001,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn tls_info(self, tls_info: bool) -> ClientBuilder {
         self.with_inner(|inner| inner.tls_info(tls_info))
@@ -1063,10 +1151,7 @@ impl ClientBuilder {
 
 impl From<async_impl::ClientBuilder> for ClientBuilder {
     fn from(builder: async_impl::ClientBuilder) -> Self {
-        Self {
-            inner: builder,
-            timeout: Timeout::default(),
-        }
+        Self { inner: builder, timeout: Timeout::default() }
     }
 }
 
@@ -1216,11 +1301,7 @@ struct InnerClientHandle {
 
 impl Drop for InnerClientHandle {
     fn drop(&mut self) {
-        let id = self
-            .thread
-            .as_ref()
-            .map(|h| h.thread().id())
-            .expect("thread not dropped yet");
+        let id = self.thread.as_ref().map(|h| h.thread().id()).expect("thread not dropped yet");
 
         trace!("closing runtime thread ({id:?})");
         self.tx.take();
@@ -1294,15 +1375,9 @@ impl ClientHandle {
             Err(_canceled) => event_loop_panicked(),
         }
 
-        let inner_handle = Arc::new(InnerClientHandle {
-            tx: Some(tx),
-            thread: Some(handle),
-        });
+        let inner_handle = Arc::new(InnerClientHandle { tx: Some(tx), thread: Some(handle) });
 
-        Ok(ClientHandle {
-            timeout,
-            inner: inner_handle,
-        })
+        Ok(ClientHandle { timeout, inner: inner_handle })
     }
 
     fn execute_request(&self, req: Request) -> crate::Result<Response> {
@@ -1332,11 +1407,9 @@ impl ClientHandle {
 
         match result {
             Ok(Err(err)) => Err(err.with_url(url)),
-            Ok(Ok(res)) => Ok(Response::new(
-                res,
-                timeout,
-                KeepCoreThreadAlive(Some(self.inner.clone())),
-            )),
+            Ok(Ok(res)) => {
+                Ok(Response::new(res, timeout, KeepCoreThreadAlive(Some(self.inner.clone()))))
+            }
             Err(wait::Waited::TimedOut(e)) => Err(crate::error::request(e).with_url(url)),
             Err(wait::Waited::Inner(err)) => Err(err.with_url(url)),
         }

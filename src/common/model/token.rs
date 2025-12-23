@@ -2,56 +2,11 @@ use crate::app::{
     constant::{AUDIENCE, ISSUER, SCOPE, TYPE_SESSION, TYPE_WEB},
     model::{Randomness, Subject},
 };
-
-#[derive(Debug, Clone, Copy)]
-#[repr(transparent)]
-pub struct StringI64(pub i64);
-
-impl ::serde::Serialize for StringI64 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
-        serializer.collect_str(&self.0)
-    }
-}
-
-impl<'de> ::serde::Deserialize<'de> for StringI64 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
-        struct I64Visitor;
-
-        impl ::serde::de::Visitor<'_> for I64Visitor {
-            type Value = StringI64;
-
-            fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-                formatter.write_str("64-bit signed integer")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: ::serde::de::Error,
-            {
-                match str::parse(value) {
-                    Ok(i) => Ok(StringI64(i)),
-                    Err(e) => Err(E::custom(e)),
-                }
-            }
-        }
-
-        deserializer.deserialize_str(I64Visitor)
-    }
-}
-
-// 编译时断言确保类型布局正确
-const _: () = assert!(::core::mem::size_of::<StringI64>() == 8);
-const _: () = assert!(::core::mem::align_of::<StringI64>() == 8);
+use super::stringify::Stringify;
 
 pub struct TokenPayload {
     pub sub: Subject,
-    pub time: StringI64,
+    pub time: Stringify<i64>,
     pub randomness: Randomness,
     pub exp: i64,
     pub is_session: bool,

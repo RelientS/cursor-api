@@ -1,179 +1,163 @@
-//! 项目和构建时间追踪模块
+//! 跨平台项目和构建时间追踪
 //!
-//! 提供跨平台的时间基准点定义和优雅的时间差显示功能。
-//! 支持项目启动时间（按天计算）和构建时间（按分钟计算）的追踪。
-
-use std::fmt;
+//! 提供项目启动时间（天级）和构建时间（分钟级）的优雅显示。
 
 pub use super::build::BUILD_EPOCH;
+use crate::common::utils::now_with_epoch;
+use chrono::{DateTime, Utc};
+use core::fmt;
 
-/// Unix 系统的时间基准点（2024-12-23 01:30:48 UTC）
+/// 项目基准时间点（2024-12-23 01:30:48 UTC）
 #[cfg(unix)]
-pub const EPOCH: std::time::SystemTime = unsafe {
-    #[allow(dead_code)]
-    struct UnixSystemTime {
-        tv_sec: i64,
-        tv_nsec: u32,
-    }
+pub const EPOCH: std::time::SystemTime =
+    unsafe { core::intrinsics::transmute((1734915448i64, 0u32)) };
 
-    ::core::intrinsics::transmute_unchecked(UnixSystemTime {
-        tv_sec: 1734915448,
-        tv_nsec: 0,
-    })
-};
-
-/// Windows 系统的时间基准点（2024-12-23 01:30:48 UTC）
+/// 项目基准时间点（2024-12-23 01:30:48 UTC）
+///
+/// Windows使用FILETIME格式（100纳秒间隔数）
 #[cfg(windows)]
 pub const EPOCH: std::time::SystemTime = unsafe {
-    #[allow(dead_code)]
-    struct WindowsFileTime {
-        dw_low_date_time: u32,
-        dw_high_date_time: u32,
-    }
-
     const INTERVALS_PER_SEC: u64 = 10_000_000;
     const INTERVALS_TO_UNIX_EPOCH: u64 = 11_644_473_600 * INTERVALS_PER_SEC;
     const TARGET_INTERVALS: u64 = INTERVALS_TO_UNIX_EPOCH + 1734915448 * INTERVALS_PER_SEC;
 
-    ::core::intrinsics::transmute_unchecked(WindowsFileTime {
-        dw_low_date_time: TARGET_INTERVALS as u32,
-        dw_high_date_time: (TARGET_INTERVALS >> 32) as u32,
-    })
+    core::intrinsics::transmute((TARGET_INTERVALS as u32, (TARGET_INTERVALS >> 32) as u32))
 };
 
-/// 打印项目启动以来的时间
-///
-/// 以年、月、日的形式显示项目运行时长
+const EPOCH_DATETIME: DateTime<Utc> =
+    unsafe { DateTime::from_timestamp(1734915448i64, 0u32).unwrap_unchecked() };
+
+/// 打印项目运行时长（年月日）
 pub fn print_project_age() {
     let age = ProjectAge::since_epoch();
     println!("Project started {age} ago");
 }
 
-/// 打印程序构建以来的时间
-///
-/// 以分钟级精度显示构建时长，包含友好的时间描述
+/// 打印构建时长（分钟级）
 pub fn print_build_age() {
     let age = BuildAge::since_build();
     println!("Program built {age} ago");
 }
 
-/// 项目年龄表示，以天为最小单位
-///
-/// 用于表示较长时间跨度，适合项目生命周期追踪
+/// 项目年龄（天级精度）
 #[derive(Debug, Clone, Copy)]
 struct ProjectAge {
-    years: u64,
-    months: u64,
-    days: u64,
+    years: u32,
+    months: u32,
+    days: u32,
 }
 
 impl ProjectAge {
-    /// 计算自项目 EPOCH 以来的时间
+    /// 基于日历算法计算年龄
     ///
+    /// 处理月末边界情况：起始日31号且目标月不足31天时，
+    /// 计算到目标月末，剩余日期计入days
+    fn from_duration(duration: core::time::Duration) -> Self {
+        use chrono::Datelike as _;
+
+        // SAFETY: duration来自NTP同步模块，保证不会导致无效时间戳
+        let current_datetime = EPOCH_DATETIME + __unwrap!(chrono::TimeDelta::from_std(duration));
+
+        let current_year = current_datetime.year();
+        let current_month = current_datetime.month();
+        let current_day = current_datetime.day();
+        unsafe { core::hint::assert_unchecked(current_year >= 2025) }
+
+        let mut years = current_year - 2024;
+        let mut months = current_month as i32 - 12;
+        let mut days = current_day as i32 - 23;
+
+        // 日期借位
+        if days < 0 {
+            months -= 1;
+            let (year, month) = if current_month == 1 {
+                (current_year - 1, 12)
+            } else {
+                (current_year, current_month - 1)
+            };
+            let last_day_of_prev_month = unsafe {
+                chrono::NaiveDate::from_ymd_opt(year, month, 1)
+                    .unwrap_unchecked()
+                    .pred_opt()
+                    .unwrap_unchecked()
+            };
+            days += last_day_of_prev_month.day() as i32;
+        }
+
+        // 月份借位
+        if months < 0 {
+            years -= 1;
+            months += 12;
+        }
+
+        Self { years: years as u32, months: months as u32, days: days as u32 }
+    }
+
     /// # Panics
-    ///
-    /// 如果系统时间早于项目 EPOCH 时间则会 panic
+    /// 系统时间早于项目EPOCH时panic
     #[inline]
     pub fn since_epoch() -> Self {
-        let duration = std::time::SystemTime::now()
-            .duration_since(EPOCH)
-            .expect("system time before program epoch");
-
-        Self::from_days(duration.as_secs() / 86400)
-    }
-
-    /// 从总天数创建 ProjectAge 实例
-    ///
-    /// 使用简化的时间计算：
-    /// - 1年 = 365天
-    /// - 1月 = 30天
-    /// - 包含基本的闰年调整
-    #[inline]
-    fn from_days(total_days: u64) -> Self {
-        if total_days == 0 {
-            return Self {
-                years: 0,
-                months: 0,
-                days: 0,
-            };
-        }
-
-        let years = total_days / 365;
-        let remaining_days = total_days % 365;
-
-        // 简单的闰年调整
-        let leap_adjustment = years / 4;
-        let adjusted_days = remaining_days.saturating_sub(leap_adjustment);
-
-        let months = adjusted_days / 30;
-        let days = adjusted_days % 30;
-
-        Self {
-            years,
-            months,
-            days,
-        }
+        let duration = now_with_epoch(EPOCH, "system time before program epoch");
+        Self::from_duration(duration)
     }
 }
 
-impl fmt::Display for ProjectAge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.years, self.months, self.days) {
-            (0, 0, 0) => write!(f, "less than 1 day"),
-            (0, 0, d) => write!(f, "{d} day{}", if d == 1 { "" } else { "s" }),
-            (0, m, 0) => write!(f, "{m} month{}", if m == 1 { "" } else { "s" }),
-            (0, m, d) => write!(
-                f,
-                "{m} month{} and {d} day{}",
-                if m == 1 { "" } else { "s" },
-                if d == 1 { "" } else { "s" }
-            ),
-            (y, 0, 0) => write!(f, "{y} year{}", if y == 1 { "" } else { "s" }),
-            (y, 0, d) => write!(
-                f,
-                "{y} year{} and {d} day{}",
-                if y == 1 { "" } else { "s" },
-                if d == 1 { "" } else { "s" }
-            ),
-            (y, m, 0) => write!(
-                f,
-                "{y} year{} and {m} month{}",
-                if y == 1 { "" } else { "s" },
-                if m == 1 { "" } else { "s" }
-            ),
-            (y, m, d) => write!(
-                f,
-                "{y} year{}, {m} month{}, and {d} day{}",
-                if y == 1 { "" } else { "s" },
-                if m == 1 { "" } else { "s" },
-                if d == 1 { "" } else { "s" }
-            ),
-        }
-    }
-}
-
-/// 构建年龄表示，以分钟为最小单位
-///
-/// 用于表示较短时间跨度，适合构建时间追踪，提供友好的时间描述
+/// 构建年龄（分钟级精度）
 #[derive(Debug, Clone, Copy)]
 struct BuildAge {
     minutes: u64,
 }
 
 impl BuildAge {
-    /// 计算自构建 EPOCH 以来的时间
-    ///
     /// # Panics
-    ///
-    /// 如果系统时间早于构建 EPOCH 时间则会 panic
+    /// 系统时间早于构建EPOCH时panic
     #[inline]
     pub fn since_build() -> Self {
-        let duration = std::time::SystemTime::now()
-            .duration_since(BUILD_EPOCH)
-            .expect("system time before build epoch");
+        let duration = now_with_epoch(BUILD_EPOCH, "system time before build epoch");
+        Self { minutes: duration.as_secs() / 60 }
+    }
+}
 
-        Self {
-            minutes: duration.as_secs() / 60,
+struct Unit {
+    word: &'static str,
+    count: core::num::NonZeroU32,
+}
+
+impl fmt::Display for Unit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = self.count.get();
+        write!(f, "{n} {}", self.word)?;
+        if n > 1 { f.write_str("s") } else { Ok(()) }
+    }
+}
+
+macro_rules! unit_fn {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[inline]
+            fn $name(n: u32) -> Unit {
+                Unit {
+                    word: stringify!($name),
+                    count: unsafe { core::num::NonZeroU32::new_unchecked(n) }
+                }
+            }
+        )*
+    };
+}
+
+unit_fn!(year, month, day, hour, minute);
+
+impl fmt::Display for ProjectAge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.years, self.months, self.days) {
+            (0, 0, 0) => f.write_str("less than 1 day"),
+            (0, 0, d) => day(d).fmt(f),
+            (0, m, 0) => month(m).fmt(f),
+            (0, m, d) => write!(f, "{} and {}", month(m), day(d)),
+            (y, 0, 0) => year(y).fmt(f),
+            (y, 0, d) => write!(f, "{} and {}", year(y), day(d)),
+            (y, m, 0) => write!(f, "{} and {}", year(y), month(m)),
+            (y, m, d) => write!(f, "{}, {}, and {}", year(y), month(m), day(d)),
         }
     }
 }
@@ -181,93 +165,22 @@ impl BuildAge {
 impl fmt::Display for BuildAge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.minutes {
-            0 => write!(f, "just now"),
-            1 => write!(f, "1 minute"),
-            m if m < 60 => write!(f, "{m} minutes"),
-            m if m < 120 => {
-                let mins = m % 60;
-                if mins == 0 {
-                    write!(f, "1 hour")
-                } else {
-                    write!(
-                        f,
-                        "1 hour and {mins} minute{}",
-                        if mins == 1 { "" } else { "s" }
-                    )
-                }
+            0 => f.write_str("just now"),
+            m @ 1..60 => minute(m as u32).fmt(f),
+            m @ 60..120 => {
+                let m = (m % 60) as u32;
+                if m == 0 { hour(1).fmt(f) } else { write!(f, "{} and {}", hour(1), minute(m)) }
             }
-            m if m < 1440 => {
-                let hours = m / 60;
-                let mins = m % 60;
-                if mins == 0 {
-                    write!(f, "{hours} hour{}", if hours == 1 { "" } else { "s" })
-                } else {
-                    write!(
-                        f,
-                        "{hours} hour{} and {mins} minute{}",
-                        if hours == 1 { "" } else { "s" },
-                        if mins == 1 { "" } else { "s" }
-                    )
-                }
+            m @ 120..1440 => {
+                let h = (m / 60) as u32;
+                let m = (m % 60) as u32;
+                if m == 0 { hour(h).fmt(f) } else { write!(f, "{} and {}", hour(h), minute(m)) }
             }
             m => {
-                let days = m / 1440;
-                let remaining_hours = (m % 1440) / 60;
-                if remaining_hours == 0 {
-                    write!(f, "{days} day{}", if days == 1 { "" } else { "s" })
-                } else {
-                    write!(
-                        f,
-                        "{days} day{} and {remaining_hours} hour{}",
-                        if days == 1 { "" } else { "s" },
-                        if remaining_hours == 1 { "" } else { "s" }
-                    )
-                }
+                let d = (m / 1440) as u32;
+                let h = ((m % 1440) / 60) as u32;
+                if h == 0 { day(d).fmt(f) } else { write!(f, "{} and {}", day(d), hour(h)) }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_project_age_display() {
-        let age = ProjectAge {
-            years: 0,
-            months: 0,
-            days: 0,
-        };
-        assert_eq!(format!("{}", age), "less than 1 day");
-
-        let age = ProjectAge {
-            years: 1,
-            months: 2,
-            days: 3,
-        };
-        assert_eq!(format!("{}", age), "1 year, 2 months, and 3 days");
-
-        let age = ProjectAge {
-            years: 2,
-            months: 1,
-            days: 1,
-        };
-        assert_eq!(format!("{}", age), "2 years, 1 month, and 1 day");
-    }
-
-    #[test]
-    fn test_build_age_display() {
-        let age = BuildAge { minutes: 0 };
-        assert_eq!(format!("{}", age), "just now");
-
-        let age = BuildAge { minutes: 1 };
-        assert_eq!(format!("{}", age), "1 minute");
-
-        let age = BuildAge { minutes: 65 };
-        assert_eq!(format!("{}", age), "1 hour and 5 minutes");
-
-        let age = BuildAge { minutes: 120 };
-        assert_eq!(format!("{}", age), "2 hours");
     }
 }

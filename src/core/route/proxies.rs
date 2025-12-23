@@ -9,9 +9,10 @@ use crate::{
         utils::string_builder::StringBuilder,
     },
 };
-use ahash::HashMap;
+use alloc::{borrow::Cow, sync::Arc};
 use axum::{Json, http::StatusCode};
-use std::{borrow::Cow, sync::Arc};
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
 
 crate::define_typed_constants! {
     &'static str => {

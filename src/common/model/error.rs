@@ -1,15 +1,12 @@
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 use crate::core::model::{anthropic, openai};
-
 use super::GenericError;
 
 pub enum ChatError {
     ModelNotSupported(String),
     EmptyMessages,
-    NoTokens,
     RequestFailed(Cow<'static, str>),
-    Unauthorized,
     ProcessingFailed(Cow<'static, str>),
 }
 
@@ -19,9 +16,7 @@ impl ChatError {
         match self {
             Self::ModelNotSupported(_) => "model_not_supported",
             Self::EmptyMessages => "empty_messages",
-            Self::NoTokens => "no_tokens",
             Self::RequestFailed(_) => "request_failed",
-            Self::Unauthorized => "unauthorized",
             Self::ProcessingFailed(_) => "processing_failed",
         }
     }
@@ -33,9 +28,7 @@ impl core::fmt::Display for ChatError {
         match self {
             Self::ModelNotSupported(model) => write!(f, "Model '{model}' is not supported"),
             Self::EmptyMessages => write!(f, "Message array cannot be empty"),
-            Self::NoTokens => write!(f, "No available tokens"),
             Self::RequestFailed(err) => write!(f, "Request failed: {err}"),
-            Self::Unauthorized => write!(f, "Invalid authorization token"),
             Self::ProcessingFailed(err) => write!(f, "Processing failed: {err}"),
         }
     }
@@ -54,19 +47,19 @@ impl ChatError {
 
     #[inline]
     pub fn to_openai(&self) -> openai::OpenAiError {
-        openai::ErrorDetail {
+        openai::OpenAiErrorInner {
             code: Some(Cow::Borrowed(self.error_type())),
             message: Cow::Owned(self.to_string()),
         }
-        .into_openai()
+        .wrapped()
     }
 
     #[inline]
     pub fn to_anthropic(&self) -> anthropic::AnthropicError {
-        anthropic::ErrorDetail {
+        anthropic::AnthropicErrorInner {
             r#type: self.error_type(),
             message: Cow::Owned(self.to_string()),
         }
-        .into_anthropic()
+        .wrapped()
     }
 }

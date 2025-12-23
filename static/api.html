@@ -1681,7 +1681,7 @@
 
     async function generateTimestampHeader() {
       try {
-        const response = await fetch('/get-timestamp-header');
+        const response = await fetch('/get-checksum-header');
         const timestampHeader = await response.text();
 
         copyToClipboard(timestampHeader, {

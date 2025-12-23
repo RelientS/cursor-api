@@ -27,35 +27,15 @@ const cssOptions = {
   level: 2
 };
 
-// 处理文件
-async function minifyFile(inputPath, outputPath) {
-  try {
-    let ext = path.extname(inputPath).toLowerCase();
-    if (ext === '.md') ext = '.html';
-    const filename = path.basename(inputPath);
-    let content = fs.readFileSync(inputPath, 'utf8');
-    let minified;
-
-    // 特殊处理 readme.html
-    if (filename.toLowerCase() === 'readme.md') {
-      const md = new MarkdownIt({
-        html: true,
-        linkify: true,
-        typographer: true
-      }).use(MarkdownItAnchor, {
-        // 可选：自定义slug生成函数
-        slugify: (s) => String(s).trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w\u4e00-\u9fa5\-]/g, '')
-      });
-      const readmeMdPath = path.join(__dirname, '..', 'README.md');
-      const markdownContent = fs.readFileSync(readmeMdPath, 'utf8');
-      // 添加基本的 markdown 样式
-      const htmlContent = `
+// 生成 Markdown HTML 模板
+function generateMarkdownHtml(title, markdownContent, md) {
+  return `
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>README</title>
+    <title>${title}</title>
     <style>
         :root {
             --bg-color: #ffffff;
@@ -90,7 +70,11 @@ async function minifyFile(inputPath, outputPath) {
         }
         code {
             background-color: var(--code-bg);
+            padding: 2px 4px;
             border-radius: 3px;
+        }
+        pre code {
+            padding: 0;
         }
         img {
             max-width: 100%;
@@ -133,8 +117,40 @@ async function minifyFile(inputPath, outputPath) {
     ${md.render(markdownContent)}
 </body>
 </html>
-      `;
-      content = htmlContent;
+  `;
+}
+
+// 处理文件
+async function minifyFile(inputPath, outputPath) {
+  try {
+    let ext = path.extname(inputPath).toLowerCase();
+    const filename = path.basename(inputPath);
+    let content = fs.readFileSync(inputPath, 'utf8');
+    let minified;
+
+    // 处理 Markdown 文件
+    if (ext === '.md') {
+      const md = new MarkdownIt({
+        html: true,
+        linkify: true,
+        typographer: true
+      }).use(MarkdownItAnchor, {
+        slugify: (s) => String(s).trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w\u4e00-\u9fa5\-]/g, '')
+      });
+
+      // 根据文件名确定标题
+      const baseName = path.basename(inputPath, '.md');
+      const title = baseName.charAt(0).toUpperCase() + baseName.slice(1).toLowerCase();
+
+      // 读取 Markdown 内容
+      const markdownPath = inputPath.toLowerCase().endsWith('.md')
+        ? inputPath
+        : path.join(__dirname, '..', baseName + '.md');
+      const markdownContent = fs.readFileSync(markdownPath, 'utf8');
+
+      // 生成 HTML
+      content = generateMarkdownHtml(title, markdownContent, md);
+      ext = '.html';
     }
 
     switch (ext) {
@@ -187,14 +203,16 @@ async function main() {
   const staticDir = path.join(__dirname, '..', 'static');
 
   for (const file of files) {
-    // 特殊处理 README.md 的输入路径
     let inputPath;
     let outputPath;
 
-    if (file.toLowerCase() === 'readme.md') {
-      inputPath = path.join(__dirname, '..', 'README.md');
-      outputPath = path.join(staticDir, 'readme.min.html');
+    // 处理 Markdown 文件
+    if (file.toLowerCase().endsWith('.md')) {
+      const baseName = path.basename(file, '.md').toLowerCase();
+      inputPath = path.join(__dirname, '..', file);
+      outputPath = path.join(staticDir, `${baseName}.min.html`);
     } else {
+      // 处理其他静态文件
       inputPath = path.join(staticDir, file);
       const ext = path.extname(file);
       outputPath = path.join(

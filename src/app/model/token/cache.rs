@@ -1,6 +1,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use ::core::{
+use super::{Randomness, RawToken, UserId};
+use crate::common::utils::{from_base64, to_base64};
+use core::{
     alloc::Layout,
     hash::Hasher,
     marker::PhantomData,
@@ -8,20 +10,15 @@ use ::core::{
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use ::hashbrown::HashMap;
-use ::parking_lot::RwLock;
-
-use super::{Randomness, RawToken, UserId};
-use crate::{
-    common::utils::{from_base64, to_base64},
-    leak::manually_init::ManuallyInit,
-};
+use hashbrown::HashMap;
+use manually_init::ManuallyInit;
+use parking_lot::RwLock;
 
 /// Token 的唯一标识键
 ///
 /// 由用户ID和随机数组成，用于在全局缓存中查找对应的 Token
 #[derive(
-    PartialEq, Eq, Hash, Clone, Copy, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize,
+    Debug, PartialEq, Eq, Hash, Clone, Copy, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize,
 )]
 #[rkyv(derive(PartialEq, Eq, Hash))]
 pub struct TokenKey {
@@ -40,12 +37,12 @@ impl TokenKey {
     pub fn to_string(self) -> String {
         let mut bytes = [0u8; 24];
         unsafe {
-            ::core::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 self.user_id.to_bytes().as_ptr(),
                 bytes.as_mut_ptr(),
                 16,
             );
-            ::core::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 self.randomness.to_bytes().as_ptr(),
                 bytes.as_mut_ptr().add(16),
                 8,
@@ -59,10 +56,11 @@ impl TokenKey {
     /// 格式：`<user_id>-<randomness>`
     #[inline]
     pub fn to_string2(self) -> String {
+        let mut buffer = itoa::Buffer::new();
         let mut string = String::with_capacity(60);
-        string.push_str(&self.user_id.as_u128().to_string());
+        string.push_str(buffer.format(self.user_id.as_u128()));
         string.push('-');
-        string.push_str(&self.randomness.as_u64().to_string());
+        string.push_str(buffer.format(self.randomness.as_u64()));
         string
     }
 
@@ -80,14 +78,10 @@ impl TokenKey {
 
         // base64 格式
         if bytes.len() == 32 {
-            let decoded = from_base64(s)?;
-            let user_id = UserId::from_bytes(__unwrap!(decoded.get_unchecked(..16).try_into()));
-            let randomness =
-                Randomness::from_bytes(__unwrap!(decoded.get_unchecked(16..24).try_into()));
-            return Some(Self {
-                user_id,
-                randomness,
-            });
+            let decoded: [u8; 24] = __unwrap!(from_base64(s)?.try_into());
+            let user_id = UserId::from_bytes(__unwrap!(decoded[0..16].try_into()));
+            let randomness = Randomness::from_bytes(__unwrap!(decoded[16..24].try_into()));
+            return Some(Self { user_id, randomness });
         }
 
         // 分隔符格式
@@ -106,10 +100,9 @@ impl TokenKey {
 
         let sep_pos = sep_pos?;
 
-        let first_part =
-            unsafe { ::core::str::from_utf8_unchecked(bytes.get_unchecked(..sep_pos)) };
+        let first_part = unsafe { core::str::from_utf8_unchecked(bytes.get_unchecked(..sep_pos)) };
         let second_part =
-            unsafe { ::core::str::from_utf8_unchecked(bytes.get_unchecked(sep_pos + 1..)) };
+            unsafe { core::str::from_utf8_unchecked(bytes.get_unchecked(sep_pos + 1..)) };
 
         let user_id_val = first_part.parse::<u128>().ok()?;
         let randomness_val = second_part.parse::<u64>().ok()?;
@@ -156,8 +149,8 @@ impl TokenInner {
     #[inline(always)]
     const unsafe fn as_str(&self) -> &str {
         let ptr = self.string_ptr();
-        let slice = ::core::slice::from_raw_parts(ptr, self.string_len);
-        ::core::str::from_utf8_unchecked(slice)
+        let slice = core::slice::from_raw_parts(ptr, self.string_len);
+        core::str::from_utf8_unchecked(slice)
     }
 
     /// 计算存储指定长度字符串所需的内存布局
@@ -186,7 +179,7 @@ impl TokenInner {
 
         // 复制字符串数据
         let string_ptr = (*inner).string_ptr() as *mut u8;
-        ::core::ptr::copy_nonoverlapping(string.as_ptr(), string_ptr, string.len());
+        core::ptr::copy_nonoverlapping(string.as_ptr(), string_ptr, string.len());
     }
 }
 
@@ -197,7 +190,7 @@ impl TokenInner {
 #[repr(transparent)]
 pub struct Token {
     ptr: NonNull<TokenInner>,
-    _marker: PhantomData<TokenInner>,
+    _pd: PhantomData<TokenInner>,
 }
 
 // Safety: Token 使用原子引用计数，可以安全地在线程间传递
@@ -215,10 +208,7 @@ impl Clone for Token {
             }
         }
 
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        Self { ptr: self.ptr, _pd: PhantomData }
     }
 }
 
@@ -231,15 +221,12 @@ unsafe impl Send for ThreadSafePtr {}
 unsafe impl Sync for ThreadSafePtr {}
 
 /// 全局 Token 缓存池
-static TOKEN_MAP: ManuallyInit<RwLock<HashMap<TokenKey, ThreadSafePtr, ::ahash::RandomState>>> =
+static TOKEN_MAP: ManuallyInit<RwLock<HashMap<TokenKey, ThreadSafePtr, ahash::RandomState>>> =
     ManuallyInit::new();
 
 #[inline(always)]
-pub unsafe fn __init() {
-    TOKEN_MAP.init(RwLock::new(HashMap::with_capacity_and_hasher(
-        64,
-        ::ahash::RandomState::new(),
-    )))
+pub fn __init() {
+    TOKEN_MAP.init(RwLock::new(HashMap::with_capacity_and_hasher(64, ahash::RandomState::new())))
 }
 
 impl Token {
@@ -247,34 +234,41 @@ impl Token {
     ///
     /// 如果缓存中已存在相同的 TokenKey 且 RawToken 相同，则复用；
     /// 否则创建新实例（可能会覆盖旧的）。
+    ///
+    /// # 并发安全性
+    /// - 使用 read-write lock 保护全局缓存
+    /// - 快速路径（read lock）：尝试复用已有实例
+    /// - 慢速路径（write lock）：双重检查后创建新实例，防止竞态条件
     pub fn new(raw: RawToken, string: Option<String>) -> Self {
         let key = raw.key();
 
-        // 快速路径：尝试从缓存中查找
+        // 快速路径：尝试从缓存中查找并增加引用计数
         {
             let cache = TOKEN_MAP.read();
             if let Some(&ThreadSafePtr(ptr)) = cache.get(&key) {
                 unsafe {
                     let inner = ptr.as_ref();
+                    // 验证 RawToken 是否完全匹配（key 相同不代表 raw 相同）
                     if inner.raw == raw {
                         let count = inner.count.fetch_add(1, Ordering::Relaxed);
+                        // 防止引用计数溢出（理论上不可能，但作为安全检查）
                         if count > isize::MAX as usize {
                             __cold_path!();
                             std::process::abort();
                         }
-                        return Self {
-                            ptr,
-                            _marker: PhantomData,
-                        };
+                        return Self { ptr, _pd: PhantomData };
+                    } else {
+                        __cold_path!();
+                        crate::debug!("{} != {}", inner.raw, raw);
                     }
                 }
             }
         }
 
-        // 慢速路径：需要创建新实例
+        // 慢速路径：创建新实例（需要独占访问缓存）
         let mut cache = TOKEN_MAP.write();
 
-        // 双重检查，防止竞态条件
+        // 双重检查：防止在获取 write lock 前，其他线程已经创建了相同的 Token
         if let Some(&ThreadSafePtr(ptr)) = cache.get(&key) {
             unsafe {
                 let inner = ptr.as_ref();
@@ -284,36 +278,34 @@ impl Token {
                         __cold_path!();
                         std::process::abort();
                     }
-                    return Self {
-                        ptr,
-                        _marker: PhantomData,
-                    };
+                    return Self { ptr, _pd: PhantomData };
+                } else {
+                    __cold_path!();
+                    crate::debug!("{} != {}", inner.raw, raw);
                 }
             }
         }
 
-        // 准备字符串表示
+        // 准备字符串表示（在堆上分配之前）
         let string = string.unwrap_or_else(|| raw.to_string());
         let layout = TokenInner::layout_for_string(string.len());
 
-        // 分配并初始化新实例
+        // 分配并初始化新实例（使用自定义 DST 布局）
         let ptr = unsafe {
-            let alloc = ::std::alloc::alloc(layout) as *mut TokenInner;
+            let alloc = alloc::alloc::alloc(layout) as *mut TokenInner;
             if alloc.is_null() {
                 __cold_path!();
-                ::std::alloc::handle_alloc_error(layout);
+                alloc::alloc::handle_alloc_error(layout);
             }
             let ptr = NonNull::new_unchecked(alloc);
             TokenInner::write_with_string(ptr, raw, &string);
             ptr
         };
 
+        // 将新实例插入缓存（持有 write lock，保证线程安全）
         cache.insert(key, ThreadSafePtr(ptr));
 
-        Self {
-            ptr,
-            _marker: PhantomData,
-        }
+        Self { ptr, _pd: PhantomData }
     }
 
     /// 获取原始 token 数据
@@ -342,20 +334,35 @@ impl Drop for Token {
         unsafe {
             let inner = self.ptr.as_ref();
 
-            // 递减引用计数，如果不是最后一个引用则直接返回
+            // 递减引用计数，使用 Release ordering 确保之前的所有修改对后续操作可见
             if inner.count.fetch_sub(1, Ordering::Release) != 1 {
+                // 不是最后一个引用，直接返回
                 return;
             }
 
-            // 确保其他线程的所有操作都已完成
-            ::core::sync::atomic::fence(Ordering::Acquire);
+            // 最后一个引用：需要清理资源
+            // 获取 write lock 以保护缓存操作，同时防止并发的 new() 操作干扰
+            let mut cache = TOKEN_MAP.write();
 
-            // 从缓存中移除并释放内存
+            // 双重检查引用计数：防止在等待 write lock 期间，其他线程通过 new() 增加了引用
+            // 例如：
+            //   Thread A: fetch_sub 返回 1
+            //   Thread B: 在 new() 中找到此 token，fetch_add 增加计数
+            //   Thread A: 获取 write lock
+            // 此时必须重新检查，否则会错误地释放正在使用的内存
+            if inner.count.load(Ordering::Relaxed) != 0 {
+                // 有新的引用产生，取消释放操作
+                return;
+            }
+
+            // 确认是最后一个引用，执行清理：
+            // 1. 从缓存中移除（防止后续 new() 找到已释放的指针）
             let key = inner.raw.key();
-            TOKEN_MAP.write().remove(&key);
+            cache.remove(&key);
 
+            // 2. 释放堆内存（包括 TokenInner 和内联的字符串数据）
             let layout = TokenInner::layout_for_string(inner.string_len);
-            ::std::alloc::dealloc(self.ptr.cast().as_ptr(), layout);
+            alloc::alloc::dealloc(self.ptr.cast().as_ptr(), layout);
         }
     }
 }
@@ -364,23 +371,19 @@ impl Drop for Token {
 
 impl PartialEq for Token {
     #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { self.ptr.as_ref().raw == other.ptr.as_ref().raw }
-    }
+    fn eq(&self, other: &Self) -> bool { self.ptr == other.ptr }
 }
 
 impl Eq for Token {}
 
-impl ::core::hash::Hash for Token {
+impl core::hash::Hash for Token {
     #[inline(always)]
     fn hash<H: Hasher>(&self, state: &mut H) { self.key().hash(state); }
 }
 
-impl ::core::fmt::Display for Token {
+impl core::fmt::Display for Token {
     #[inline(always)]
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { f.write_str(self.as_str()) }
 }
 
 // ===== Serde 实现 =====
@@ -392,9 +395,7 @@ mod serde_impls {
     impl Serialize for Token {
         #[inline]
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
+        where S: Serializer {
             self.as_str().serialize(serializer)
         }
     }
@@ -402,9 +403,7 @@ mod serde_impls {
     impl<'de> Deserialize<'de> for Token {
         #[inline]
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
+        where D: Deserializer<'de> {
             let s = String::deserialize(deserializer)?;
             let raw_token = s.parse().map_err(::serde::de::Error::custom)?;
             Ok(Token::new(raw_token, Some(s)))

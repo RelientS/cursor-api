@@ -1,10 +1,5 @@
 pub mod log;
-
-use ::std::{
-    borrow::Cow,
-    path::PathBuf,
-    sync::{LazyLock, OnceLock},
-};
+mod path;
 
 use super::{
     constant::{
@@ -14,28 +9,24 @@ use super::{
     model::{DateTime, GcppHost},
 };
 use crate::common::utils::parse_from_env;
+use alloc::borrow::Cow;
+use manually_init::ManuallyInit;
+pub use path::{DATA_DIR, LOGS_FILE_PATH, PROXIES_FILE_PATH, TOKENS_FILE_PATH, init as init_paths};
+use std::sync::LazyLock;
 
 macro_rules! def_pub_static {
-    // 基础版本：直接存储 String
-    ($name:ident, $value:expr) => {
-        pub static $name: LazyLock<String> = LazyLock::new(|| $value);
-    };
-
-    // 环境变量版本
     ($name:ident,env: $env_key:expr,default: $default:expr) => {
         pub static $name: LazyLock<Cow<'static, str>> =
             LazyLock::new(|| parse_from_env($env_key, $default));
     };
 }
 
-def_pub_static!(AUTH_TOKEN, env: "AUTH_TOKEN", default: EMPTY_STRING);
+pub static AUTH_TOKEN: ManuallyInit<Cow<'static, str>> = ManuallyInit::new();
 
-static START_TIME: OnceLock<chrono::NaiveDateTime> = OnceLock::new();
+pub static START_TIME: ManuallyInit<DateTime> = ManuallyInit::new();
 
 #[inline]
-pub fn get_start_time() -> &'static chrono::NaiveDateTime {
-    START_TIME.get_or_init(DateTime::naive_now)
-}
+pub fn init_start_time() { START_TIME.init(DateTime::now()); }
 
 pub static GENERAL_TIMEZONE: LazyLock<chrono_tz::Tz> = LazyLock::new(|| {
     use std::str::FromStr as _;
@@ -54,15 +45,6 @@ pub static GENERAL_TIMEZONE: LazyLock<chrono_tz::Tz> = LazyLock::new(|| {
         }
     }
 });
-
-def_pub_static!(DEFAULT_INSTRUCTIONS, env: "DEFAULT_INSTRUCTIONS", default: "Respond in Chinese by default\n<|END_USER|>\n\n<|BEGIN_ASSISTANT|>\n\n\nYour will\n<|END_ASSISTANT|>\n\n<|BEGIN_USER|>\n\n\nThe current date is {{currentDateTime}}");
-
-pub fn get_default_instructions(now_with_tz: chrono::DateTime<chrono_tz::Tz>) -> String {
-    DEFAULT_INSTRUCTIONS.replace(
-        "{{currentDateTime}}",
-        &now_with_tz.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    )
-}
 
 pub static GENERAL_GCPP_HOST: LazyLock<GcppHost> = LazyLock::new(|| {
     let gcpp_host = parse_from_env("GENERAL_GCPP_HOST", EMPTY_STRING);
@@ -120,187 +102,159 @@ pub static USE_PUB_REVERSE_PROXY: LazyLock<bool> =
     LazyLock::new(|| !PUB_REVERSE_PROXY_HOST.is_empty());
 
 macro_rules! def_cursor_api_url {
-    // 单个API URL定义
-    ($name:ident, $api_host:ident, $path:expr) => {
-        #[doc = $path]
-        pub fn $name(is_pri: bool) -> &'static str {
-            static URL_PRI: OnceLock<String> = OnceLock::new();
-            static URL_PUB: OnceLock<String> = OnceLock::new();
-
-            if is_pri {
-                URL_PRI.get_or_init(|| {
-                    let host = if *USE_PRI_REVERSE_PROXY {
-                        &PRI_REVERSE_PROXY_HOST
-                    } else {
-                        $api_host
-                    };
-                    let mut url = String::with_capacity(HTTPS_PREFIX.len() + host.len() + $path.len());
-                    url.push_str(HTTPS_PREFIX);
-                    url.push_str(host);
-                    url.push_str($path);
-                    url
-                })
-            } else {
-                URL_PUB.get_or_init(|| {
-                    let host = if *USE_PUB_REVERSE_PROXY {
-                        &PUB_REVERSE_PROXY_HOST
-                    } else {
-                        $api_host
-                    };
-                    let mut url = String::with_capacity(HTTPS_PREFIX.len() + host.len() + $path.len());
-                    url.push_str(HTTPS_PREFIX);
-                    url.push_str(host);
-                    url.push_str($path);
-                    url
-                })
-            }
-        }
-    };
-
-    // 批量API URL定义
-    ([$($name:ident),+ $(,)?], $api_host:ident, [$($path:expr),+ $(,)?]) => {
+    (
+        init_fn: $init_fn:ident,
         $(
-            def_cursor_api_url!($name, $api_host, $path);
+            $group_name:ident => {
+                host: $api_host:ident,
+                apis: [
+                    $( $name:ident => $path:expr ),+ $(,)?
+                ]
+            }
+        ),+ $(,)?
+    ) => {
+        // 为每个API生成静态变量和getter函数
+        $(
+            $(
+                paste::paste! {
+                    static [<URL_PRI_ $name:upper>]: ManuallyInit<String> = ManuallyInit::new();
+                    static [<URL_PUB_ $name:upper>]: ManuallyInit<String> = ManuallyInit::new();
+
+                    #[inline(always)]
+                    #[doc = $path]
+                    pub fn $name(use_pri: bool) -> &'static str {
+                        if use_pri {
+                            [<URL_PRI_ $name:upper>].get()
+                        } else {
+                            [<URL_PUB_ $name:upper>].get()
+                        }
+                    }
+                }
+            )+
         )+
+
+        // 生成统一的初始化函数
+        pub fn $init_fn() {
+            $(
+                $(
+                    paste::paste! {
+                        // 初始化私有URL
+                        {
+                            let host = if *USE_PRI_REVERSE_PROXY {
+                                &PRI_REVERSE_PROXY_HOST
+                            } else {
+                                $api_host
+                            };
+                            let mut url = String::with_capacity(HTTPS_PREFIX.len() + host.len() + $path.len());
+                            url.push_str(HTTPS_PREFIX);
+                            url.push_str(host);
+                            url.push_str($path);
+                            [<URL_PRI_ $name:upper>].init(url);
+                        }
+
+                        // 初始化公共URL
+                        {
+                            let host = if *USE_PUB_REVERSE_PROXY {
+                                &PUB_REVERSE_PROXY_HOST
+                            } else {
+                                $api_host
+                            };
+                            let mut url = String::with_capacity(HTTPS_PREFIX.len() + host.len() + $path.len());
+                            url.push_str(HTTPS_PREFIX);
+                            url.push_str(host);
+                            url.push_str($path);
+                            [<URL_PUB_ $name:upper>].init(url);
+                        }
+                    }
+                )+
+            )+
+        }
     };
 }
 
-// API2 HOST 相关API
-def_cursor_api_url!(
-    [
-        chat_url,
-        chat_models_url,
-        stripe_url,
-        token_poll_url,
-        token_refresh_url,
-        server_config_url,
-        is_on_new_pricing_url,
-        sessions_url
-    ],
-    CURSOR_API2_HOST,
-    [
-        "/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
-        "/aiserver.v1.AiService/AvailableModels",
-        "/auth/full_stripe_profile",
-        "/auth/poll",
-        "/oauth/token",
-        "/aiserver.v1.ServerConfigService/GetServerConfig",
-        "/api/dashboard/is-on-new-pricing",
-        "/api/auth/sessions"
-    ]
-);
+// 一次性定义所有API
+def_cursor_api_url! {
+    init_fn: init_all_cursor_urls,
 
-// CURSOR HOST 相关API
-def_cursor_api_url!(
-    [
-        usage_api_url,
-        user_api_url,
-        token_upgrade_url,
-        teams_url,
-        aggregated_usage_events_url,
-        filtered_usage_events_url
-    ],
-    CURSOR_HOST,
-    [
-        "/api/usage",
-        "/api/auth/me",
-        "/api/auth/loginDeepCallbackControl",
-        "/api/dashboard/teams",
-        "/api/dashboard/get-aggregated-usage-events",
-        "/api/dashboard/get-filtered-usage-events"
-    ]
-);
+    // API2 HOST 相关API
+    api2_group => {
+        host: CURSOR_API2_HOST,
+        apis: [
+            chat_url => "/aiserver.v1.ChatService/StreamUnifiedChatWithTools",
+            chat_models_url => "/aiserver.v1.AiService/AvailableModels",
+            stripe_url => "/auth/full_stripe_profile",
+            token_poll_url => "/auth/poll",
+            token_refresh_url => "/oauth/token",
+            server_config_url => "/aiserver.v1.ServerConfigService/GetServerConfig",
+            dry_chat_url => "/aiserver.v1.ChatService/GetPromptDryRun",
+        ]
+    },
 
-// API4 HOST 相关API
-def_cursor_api_url!(
-    cpp_config_url,
-    CURSOR_API4_HOST,
-    "/aiserver.v1.AiService/CppConfig"
-);
+    // CURSOR HOST 相关API
+    cursor_group => {
+        host: CURSOR_HOST,
+        apis: [
+            usage_api_url => "/api/usage-summary",
+            user_api_url => "/api/dashboard/get-me",
+            token_upgrade_url => "/api/auth/loginDeepCallbackControl",
+            // teams_url => "/api/dashboard/teams",
+            // aggregated_usage_events_url => "/api/dashboard/get-aggregated-usage-events",
+            filtered_usage_events_url => "/api/dashboard/get-filtered-usage-events",
+            sessions_url => "/api/auth/sessions",
+            is_on_new_pricing_url => "/api/dashboard/is-on-new-pricing",
+            get_privacy_mode_url => "/api/dashboard/get-user-privacy-mode",
+        ]
+    },
 
-// API2 HOST CPP相关API
-def_cursor_api_url!(
-    cpp_models_url,
-    CURSOR_API2_HOST,
-    "/aiserver.v1.CppService/AvailableModels"
-);
+    // API4 HOST 相关API
+    api4_group => {
+        host: CURSOR_API4_HOST,
+        apis: [
+            cpp_config_url => "/aiserver.v1.AiService/CppConfig",
+        ]
+    },
 
-// GCPP ASIA HOST 相关API
-def_cursor_api_url!(
-    [
-        asia_upload_file_url,
-        asia_sync_file_url,
-        asia_stream_cpp_url,
-        // asia_next_cursor_prediction_url
-    ],
-    CURSOR_GCPP_ASIA_HOST,
-    [
-        "/aiserver.v1.FileSyncService/FSUploadFile",
-        "/aiserver.v1.FileSyncService/FSSyncFile",
-        "/aiserver.v1.AiService/StreamCpp",
-        // "/aiserver.v1.AiService/StreamNextCursorPrediction"
-    ]
-);
+    // API2 HOST CPP相关API
+    api2_cpp_group => {
+        host: CURSOR_API2_HOST,
+        apis: [
+            cpp_models_url => "/aiserver.v1.CppService/AvailableModels",
+        ]
+    },
 
-// GCPP EU HOST 相关API
-def_cursor_api_url!(
-    [
-        eu_upload_file_url,
-        eu_sync_file_url,
-        eu_stream_cpp_url,
-        // eu_next_cursor_prediction_url
-    ],
-    CURSOR_GCPP_EU_HOST,
-    [
-        "/aiserver.v1.FileSyncService/FSUploadFile",
-        "/aiserver.v1.FileSyncService/FSSyncFile",
-        "/aiserver.v1.AiService/StreamCpp",
-        // "/aiserver.v1.AiService/StreamNextCursorPrediction"
-    ]
-);
+    // GCPP ASIA HOST 相关API
+    gcpp_asia_group => {
+        host: CURSOR_GCPP_ASIA_HOST,
+        apis: [
+            asia_upload_file_url => "/aiserver.v1.FileSyncService/FSUploadFile",
+            asia_sync_file_url => "/aiserver.v1.FileSyncService/FSSyncFile",
+            asia_stream_cpp_url => "/aiserver.v1.AiService/StreamCpp",
+            // asia_next_cursor_prediction_url => "/aiserver.v1.AiService/StreamNextCursorPrediction",
+        ]
+    },
 
-// GCPP US HOST 相关API
-def_cursor_api_url!(
-    [
-        us_upload_file_url,
-        us_sync_file_url,
-        us_stream_cpp_url,
-        // us_next_cursor_prediction_url
-    ],
-    CURSOR_GCPP_US_HOST,
-    [
-        "/aiserver.v1.FileSyncService/FSUploadFile",
-        "/aiserver.v1.FileSyncService/FSSyncFile",
-        "/aiserver.v1.AiService/StreamCpp",
-        // "/aiserver.v1.AiService/StreamNextCursorPrediction"
-    ]
-);
+    // GCPP EU HOST 相关API
+    gcpp_eu_group => {
+        host: CURSOR_GCPP_EU_HOST,
+        apis: [
+            eu_upload_file_url => "/aiserver.v1.FileSyncService/FSUploadFile",
+            eu_sync_file_url => "/aiserver.v1.FileSyncService/FSSyncFile",
+            eu_stream_cpp_url => "/aiserver.v1.AiService/StreamCpp",
+            // eu_next_cursor_prediction_url => "/aiserver.v1.AiService/StreamNextCursorPrediction",
+        ]
+    },
 
-static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    let data_dir = parse_from_env("DATA_DIR", "data");
-    let path = std::env::current_exe()
-        .ok()
-        .and_then(|exe_path| exe_path.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(&*data_dir);
-    if !path.exists() {
-        std::fs::create_dir_all(&path).expect("无法创建数据目录");
+    // GCPP US HOST 相关API
+    gcpp_us_group => {
+        host: CURSOR_GCPP_US_HOST,
+        apis: [
+            us_upload_file_url => "/aiserver.v1.FileSyncService/FSUploadFile",
+            us_sync_file_url => "/aiserver.v1.FileSyncService/FSSyncFile",
+            us_stream_cpp_url => "/aiserver.v1.AiService/StreamCpp",
+            // us_next_cursor_prediction_url => "/aiserver.v1.AiService/StreamNextCursorPrediction",
+        ]
     }
-    path
-});
-
-pub static STATIC_DIR: LazyLock<PathBuf> = LazyLock::new(|| DATA_DIR.join("static"));
-
-pub(super) static CONFIG_FILE_PATH: LazyLock<PathBuf> =
-    LazyLock::new(|| DATA_DIR.join("config.bin"));
-
-pub(super) static LOGS_FILE_PATH: LazyLock<PathBuf> = LazyLock::new(|| DATA_DIR.join("logs.bin"));
-
-pub(super) static TOKENS_FILE_PATH: LazyLock<PathBuf> =
-    LazyLock::new(|| DATA_DIR.join("tokens.bin"));
-
-pub(super) static PROXIES_FILE_PATH: LazyLock<PathBuf> =
-    LazyLock::new(|| DATA_DIR.join("proxies.bin"));
+}
 
 // TCP 和超时相关常量
 const DEFAULT_TCP_KEEPALIVE: usize = 90;

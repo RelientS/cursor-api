@@ -1,0 +1,17 @@
+[package]
+name = "manually_init"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[features]
+default = []
+sync = []
+
+[package.metadata.docs.rs]
+all-features = true

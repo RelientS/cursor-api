@@ -1,23 +1,24 @@
 mod display_name;
 
-use ::ahash::{HashMap, HashSet};
-use ::core::{
+use super::model::Model;
+use crate::app::{
+    constant::UNKNOWN,
+    lazy::START_TIME,
+    model::{DateTime, ModelIdSource},
+};
+use alloc::sync::Arc;
+use core::{
     borrow::Borrow,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
-use ::parking_lot::RwLock;
-use ::std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-
 use display_name::calculate_display_name;
+use manually_init::ManuallyInit;
+use parking_lot::RwLock;
+use std::time::Instant;
 
-use super::model::Model;
-use crate::{
-    app::{constant::UNKNOWN, lazy::get_start_time, model::DateTime},
-    leak::manually_init::ManuallyInit,
-};
+type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
+type HashSet<K> = hashbrown::HashSet<K, ahash::RandomState>;
 
 macro_rules! def_pri_const {
     ($($name:ident => $value:expr),+ $(,)?) => {
@@ -37,8 +38,6 @@ macro_rules! def_pub_const {
 
 // 错误信息
 def_pub_const!(
-    ERR_UNSUPPORTED_GIF => "不支持动态 GIF",
-    ERR_UNSUPPORTED_IMAGE_FORMAT => "不支持的图片格式，仅支持 PNG、JPEG、WEBP 和非动态 GIF",
     ERR_NODATA => "No data",
 );
 
@@ -92,18 +91,22 @@ def_const_models!(
     DEFAULT => "default",
 
     // Anthropic 模型
-    CLAUDE_4_OPUS_THINKING => "claude-4-opus-thinking",
-    CLAUDE_4_OPUS => "claude-4-opus",
-    CLAUDE_4_1_OPUS_THINKING => "claude-4.1-opus-thinking",
-    CLAUDE_4_1_OPUS => "claude-4.1-opus",
-    CLAUDE_4_SONNET_THINKING => "claude-4-sonnet-thinking",
+    CLAUDE_4_5_SONNET => "claude-4.5-sonnet",
+    CLAUDE_4_5_SONNET_THINKING => "claude-4.5-sonnet-thinking",
     CLAUDE_4_SONNET => "claude-4-sonnet",
+    CLAUDE_4_SONNET_THINKING => "claude-4-sonnet-thinking",
+    CLAUDE_4_SONNET_1M => "claude-4-sonnet-1m",
+    CLAUDE_4_SONNET_1M_THINKING => "claude-4-sonnet-1m-thinking",
+    CLAUDE_4_OPUS => "claude-4-opus",
+    CLAUDE_4_1_OPUS => "claude-4.1-opus",
+    CLAUDE_4_OPUS_THINKING => "claude-4-opus-thinking",
+    CLAUDE_4_1_OPUS_THINKING => "claude-4.1-opus-thinking",
+    CLAUDE_4_OPUS_LEGACY => "claude-4-opus-legacy",
+    CLAUDE_4_OPUS_THINKING_LEGACY => "claude-4-opus-thinking-legacy",
     CLAUDE_3_5_SONNET => "claude-3.5-sonnet",
     CLAUDE_3_7_SONNET => "claude-3.7-sonnet",
     CLAUDE_3_7_SONNET_THINKING => "claude-3.7-sonnet-thinking",
     CLAUDE_3_5_HAIKU => "claude-3.5-haiku",
-    CLAUDE_4_OPUS_LEGACY => "claude-4-opus-legacy",
-    CLAUDE_4_OPUS_THINKING_LEGACY => "claude-4-opus-thinking-legacy",
 
     // Cursor 模型
     CURSOR_SMALL => "cursor-small",
@@ -118,18 +121,21 @@ def_const_models!(
 
     // OpenAI 模型
     GPT_5 => "gpt-5",
-    GPT_5_HIGH => "gpt-5-high",
-    GPT_5_LOW => "gpt-5-low",
     GPT_5_FAST => "gpt-5-fast",
+    GPT_5_MEDIUM => "gpt-5-medium",
+    GPT_5_MEDIUM_FAST => "gpt-5-medium-fast",
+    GPT_5_HIGH => "gpt-5-high",
     GPT_5_HIGH_FAST => "gpt-5-high-fast",
+    GPT_5_LOW => "gpt-5-low",
     GPT_5_LOW_FAST => "gpt-5-low-fast",
-    GPT_5_MINI => "gpt-5-mini",
-    GPT_5_NANO => "gpt-5-nano",
     O3 => "o3",
     GPT_4_1 => "gpt-4.1",
+    GPT_5_MINI => "gpt-5-mini",
+    GPT_5_NANO => "gpt-5-nano",
     GPT_4O => "gpt-4o",
     O4_MINI => "o4-mini",
     O3_PRO => "o3-pro",
+    GPT_5_CODEX => "gpt-5-codex",
 
     // Deepseek 模型
     DEEPSEEK_R1_0528 => "deepseek-r1-0528",
@@ -139,15 +145,16 @@ def_const_models!(
     GROK_3_BETA => "grok-3-beta",
     GROK_3 => "grok-3",
     GROK_3_MINI => "grok-3-mini",
+    GROK_CODE_FAST_1 => "grok-code-fast-1",
     GROK_4 => "grok-4",
     GROK_4_0709 => "grok-4-0709",
+    GROK_4_FAST_REASONING => "grok-4-fast-reasoning",
+    GROK_4_FAST_NON_REASONING => "grok-4-fast-non-reasoning",
+    CODE_SUPERNOVA_1_MILLION => "code-supernova-1-million",
 
     // MoonshotAI 模型
     KIMI_K2_INSTRUCT => "kimi-k2-instruct",
     ACCOUNTS_FIREWORKS_MODELS_KIMI_K2_INSTRUCT => "accounts/fireworks/models/kimi-k2-instruct",
-
-    // ..
-    SONIC => "sonic",
 
     // Anthropic 模型 (legacy)
     CLAUDE_3_OPUS => "claude-3-opus",
@@ -188,6 +195,8 @@ def_const_models!(
 
 static INSTANCE: ManuallyInit<RwLock<Models>> = ManuallyInit::new();
 
+pub(super) static MODEL_ID_SOURCE: ManuallyInit<ModelIdSource> = ManuallyInit::new();
+
 macro_rules! create_models {
     ($($owner:ident => [$($model:expr,)+]),* $(,)?) => {
         #[deny(unused)]
@@ -226,6 +235,8 @@ macro_rules! create_models {
                 }
             }
 
+            MODEL_ID_SOURCE.init(ModelIdSource::from_env());
+
             display_name::init_display_name_cache();
 
             let models = vec![
@@ -249,25 +260,25 @@ macro_rules! create_models {
                 )+)*
             ];
 
-            let mut cached_ids = Vec::new();
+            let mut cached_ids = Vec::with_capacity(models.len() * 4);
             for model in &models {
-                push_ids(&mut cached_ids, model.id);
+                let id = model.id();
+
+                push_ids(&mut cached_ids, id);
 
                 if model.is_max && model.is_non_max {
-                    push_ids(&mut cached_ids, crate::leak::intern_static(format!("{}-max", model.id)));
+                    push_ids(&mut cached_ids, crate::leak::intern_static(format!("{id}-max")));
                 }
             }
-            let find_ids = HashMap::from_iter(models.iter().enumerate().map(|(i, m)| (m.id, i)));
+            let find_ids = HashMap::from_iter(models.iter().enumerate().map(|(i, m)| (m.id(), i)));
 
-            unsafe {
-                INSTANCE.init(RwLock::new(Models {
-                    models: Arc::new(models),
-                    raw_models: None,
-                    cached_ids: Arc::new(cached_ids),
-                    find_ids,
-                    last_update: Instant::now(),
-                }))
-            }
+            INSTANCE.init(RwLock::new(Models {
+                models: Arc::new(models),
+                raw_models: None,
+                cached_ids: Arc::new(cached_ids),
+                find_ids,
+                last_update: Instant::now(),
+            }))
         }
     };
 }
@@ -309,10 +320,7 @@ impl Models {
     // 查找模型并返回其 ID
     pub fn find_id(id: &str) -> Option<Model> {
         let guard = Self::get();
-        guard
-            .find_ids
-            .get(id)
-            .map(|&i| *unsafe { guard.models.get_unchecked(i) })
+        guard.find_ids.get(id).map(|&i| *unsafe { guard.models.get_unchecked(i) })
     }
 
     // 返回所有模型 ID 的列表
@@ -360,7 +368,7 @@ impl Models {
                 true
             } else {
                 let result =
-                    DateTime::naive_now() - *get_start_time() >= chrono::TimeDelta::minutes(30);
+                    DateTime::naive_now() - START_TIME.naive() >= chrono::TimeDelta::minutes(30);
                 if result {
                     FIRST_CHECK_PASSED.store(true, Ordering::Relaxed);
                 }
@@ -377,8 +385,7 @@ impl Models {
         ) -> Model {
             let (id, client_id, server_id) = model.extract_ids();
             let owned_by = {
-                #[inline]
-                fn inner(server_id: &str) -> Option<&'static str> {
+                (|server_id: &str| -> Option<&'static str> {
                     let mut chars = server_id.chars();
                     let first = chars.next()?;
 
@@ -406,25 +413,21 @@ impl Models {
                                 None
                             }
                         }
-                        'a' =>
+                        'a' => {
                             if server_id.len() > 26 {
                                 Some(FIREWORKS)
                             } else {
                                 None
-                            },
+                            }
+                        }
                         // 其他情况
                         _ => None,
                     }
-                }
-
-                inner(server_id).unwrap_or(UNKNOWN)
+                })(server_id)
+                .unwrap_or(UNKNOWN)
             };
             let is_thinking = model.supports_thinking();
-            let is_image = if server_id == DEFAULT {
-                true
-            } else {
-                model.supports_images()
-            };
+            let is_image = if server_id == DEFAULT { true } else { model.supports_images() };
             let is_max = model.supports_max_mode();
             let is_non_max = model.supports_non_max_mode();
             let display_name = calculate_display_name(client_id);
@@ -449,11 +452,7 @@ impl Models {
         let new_models: Vec<_> = match crate::app::model::AppConfig::get_fetch_models() {
             crate::app::model::FetchMode::Truncate => {
                 // 完全使用新获取的模型列表
-                available_models
-                    .models
-                    .into_iter()
-                    .map(convert_model)
-                    .collect()
+                available_models.models.into_iter().map(convert_model).collect()
             }
             crate::app::model::FetchMode::AppendTruncate => {
                 // 先收集所有在available_models中的模型ID
@@ -502,20 +501,13 @@ impl Models {
         }
 
         // 计算模型变化
-        let old_ids: HashSet<_> = data.models.iter().map(|m| m.id).collect();
-        let new_ids: HashSet<_> = new_models.iter().map(|m| m.id).collect();
+        let old_ids: HashSet<_> = data.models.iter().map(|m| m.id()).collect();
+        let new_ids: HashSet<_> = new_models.iter().map(|m| m.id()).collect();
 
         // 获取需要添加和移除的模型
-        let to_add: Vec<_> = new_models
-            .iter()
-            .filter(|m| !old_ids.contains(&m.id))
-            .collect();
+        let to_add: Vec<_> = new_models.iter().filter(|m| !old_ids.contains(&m.id())).collect();
 
-        let to_remove: Vec<_> = data
-            .models
-            .iter()
-            .filter(|m| !new_ids.contains(&m.id))
-            .collect();
+        let to_remove: Vec<_> = data.models.iter().filter(|m| !new_ids.contains(&m.id())).collect();
 
         // 从缓存中移除不再需要的ID
         let mut cached_ids: Vec<_> = data
@@ -523,19 +515,21 @@ impl Models {
             .iter()
             .filter(|&&id| {
                 !to_remove.iter().any(|m| {
+                    let mid = m.id();
+
                     // 基本ID匹配
-                    if id == m.id {
+                    if id == mid {
                         return true;
                     }
 
                     // 处理带有"-online"后缀的情况
                     if let Some(base) = id.strip_suffix("-online") {
-                        if base == m.id {
+                        if base == mid {
                             return true;
                         }
                         // 处理同时有"-max"和"-online"后缀的情况（即"-max-online"）
                         if let Some(base_without_max) = base.strip_suffix("-max")
-                            && base_without_max == m.id
+                            && base_without_max == mid
                         {
                             return true;
                         }
@@ -543,7 +537,7 @@ impl Models {
                     }
                     // 处理仅带有"-max"后缀的情况
                     else if let Some(base) = id.strip_suffix("-max") {
-                        base == m.id
+                        base == mid
                     } else {
                         false
                     }
@@ -554,18 +548,17 @@ impl Models {
 
         // 只为新增的模型创建ID组合
         for model in to_add {
-            push_ids(&mut cached_ids, model.id);
+            let id = model.id();
+
+            push_ids(&mut cached_ids, id);
 
             if model.is_max && model.is_non_max {
-                push_ids(
-                    &mut cached_ids,
-                    crate::leak::intern_static(format!("{}-max", model.id)),
-                );
+                push_ids(&mut cached_ids, crate::leak::intern_static(format!("{id}-max")));
             }
         }
 
         // 更新数据和时间戳
-        data.find_ids = HashMap::from_iter(new_models.iter().enumerate().map(|(i, m)| (m.id, i)));
+        data.find_ids = HashMap::from_iter(new_models.iter().enumerate().map(|(i, m)| (m.id(), i)));
         data.models = Arc::new(new_models);
         data.cached_ids = Arc::new(cached_ids);
         data.last_update = Instant::now();
@@ -586,20 +579,24 @@ create_models! {
     ],
 
     ANTHROPIC => [
-        ModelIds::new(CLAUDE_4_SONNET_THINKING),
+        ModelIds::new(CLAUDE_4_5_SONNET),
+        ModelIds::new(CLAUDE_4_5_SONNET_THINKING),
         ModelIds::new(CLAUDE_4_SONNET),
-        ModelIds::new(CLAUDE_4_OPUS_THINKING)
-            .with_same_id(CLAUDE_4_1_OPUS_THINKING),
+        ModelIds::new(CLAUDE_4_SONNET_THINKING),
+        ModelIds::new(CLAUDE_4_SONNET_1M),
+        ModelIds::new(CLAUDE_4_SONNET_1M_THINKING),
         ModelIds::new(CLAUDE_4_OPUS)
             .with_same_id(CLAUDE_4_1_OPUS),
-        ModelIds::new(CLAUDE_3_5_SONNET),
-        ModelIds::new(CLAUDE_3_7_SONNET),
-        ModelIds::new(CLAUDE_3_7_SONNET_THINKING),
-        ModelIds::new(CLAUDE_3_5_HAIKU),
+        ModelIds::new(CLAUDE_4_OPUS_THINKING)
+            .with_same_id(CLAUDE_4_1_OPUS_THINKING),
         ModelIds::new(CLAUDE_4_OPUS_LEGACY)
             .with_same_id(CLAUDE_4_OPUS),
         ModelIds::new(CLAUDE_4_OPUS_THINKING_LEGACY)
             .with_same_id(CLAUDE_4_OPUS_THINKING),
+        ModelIds::new(CLAUDE_3_5_SONNET),
+        ModelIds::new(CLAUDE_3_7_SONNET),
+        ModelIds::new(CLAUDE_3_7_SONNET_THINKING),
+        ModelIds::new(CLAUDE_3_5_HAIKU),
         ModelIds::new(CLAUDE_3_OPUS),
         ModelIds::new(CLAUDE_3_HAIKU_200K),
         ModelIds::new(CLAUDE_3_5_SONNET_200K),
@@ -629,10 +626,12 @@ create_models! {
 
     OPENAI => [
         ModelIds::new(GPT_5),
-        ModelIds::new(GPT_5_HIGH),
-        ModelIds::new(GPT_5_LOW),
         ModelIds::new(GPT_5_FAST),
+        ModelIds::new(GPT_5_MEDIUM),
+        ModelIds::new(GPT_5_MEDIUM_FAST),
+        ModelIds::new(GPT_5_HIGH),
         ModelIds::new(GPT_5_HIGH_FAST),
+        ModelIds::new(GPT_5_LOW),
         ModelIds::new(GPT_5_LOW_FAST),
         ModelIds::new(O3),
         ModelIds::new(GPT_4_1),
@@ -641,6 +640,7 @@ create_models! {
         ModelIds::new(GPT_4O),
         ModelIds::new(O4_MINI),
         ModelIds::new(O3_PRO),
+        ModelIds::new(GPT_5_CODEX),
         ModelIds::new(GPT_4),
         ModelIds::new(GPT_4_5_PREVIEW),
         ModelIds::new(GPT_4_TURBO_2024_04_09),
@@ -662,10 +662,13 @@ create_models! {
     XAI => [
         ModelIds::new(GROK_3_BETA)
             .with_client_id(GROK_3),
-        ModelIds::new(GROK_3),
         ModelIds::new(GROK_3_MINI),
+        ModelIds::new(GROK_CODE_FAST_1),
         ModelIds::new(GROK_4)
             .with_server_id(GROK_4_0709),
+        ModelIds::new(GROK_4_FAST_REASONING),
+        ModelIds::new(GROK_4_FAST_NON_REASONING),
+        ModelIds::new(CODE_SUPERNOVA_1_MILLION),
         ModelIds::new(GROK_2),
     ],
 
@@ -673,39 +676,29 @@ create_models! {
         ModelIds::new(KIMI_K2_INSTRUCT)
             .with_server_id(ACCOUNTS_FIREWORKS_MODELS_KIMI_K2_INSTRUCT),
     ],
-
-    UNKNOWN => [
-        ModelIds::new(SONIC),
-    ]
 }
 
-pub(super) const FREE_MODELS: [&str; 7] = [
-    GPT_4O_MINI,
-    CURSOR_FAST,
-    CURSOR_SMALL,
-    DEEPSEEK_V3,
-    DEEPSEEK_V3_1,
-    GROK_3_MINI,
-    SONIC,
-];
+pub(super) const FREE_MODELS: [&str; 6] =
+    [GPT_4O_MINI, CURSOR_FAST, CURSOR_SMALL, DEEPSEEK_V3, DEEPSEEK_V3_1, GROK_3_MINI];
 
-pub(super) const LONG_CONTEXT_MODELS: [&str; 4] = [
-    GPT_4O_128K,
-    GEMINI_1_5_FLASH_500K,
-    CLAUDE_3_HAIKU_200K,
-    CLAUDE_3_5_SONNET_200K,
-];
+pub(super) const LONG_CONTEXT_MODELS: [&str; 4] =
+    [GPT_4O_128K, GEMINI_1_5_FLASH_500K, CLAUDE_3_HAIKU_200K, CLAUDE_3_5_SONNET_200K];
 
 // 支持思考的模型
-const SUPPORTED_THINKING_MODELS: [&str; 20] = [
-    GPT_5,
-    GPT_5_HIGH,
-    GPT_5_LOW,
-    GPT_5_FAST,
-    GPT_5_HIGH_FAST,
-    GPT_5_LOW_FAST,
+const SUPPORTED_THINKING_MODELS: [&str; 27] = [
+    CLAUDE_4_5_SONNET_THINKING,
     CLAUDE_4_SONNET_THINKING,
+    CLAUDE_4_SONNET_1M_THINKING,
     CLAUDE_4_OPUS_THINKING,
+    CLAUDE_4_OPUS_THINKING_LEGACY,
+    GPT_5,
+    GPT_5_FAST,
+    GPT_5_MEDIUM,
+    GPT_5_MEDIUM_FAST,
+    GPT_5_HIGH,
+    GPT_5_HIGH_FAST,
+    GPT_5_LOW,
+    GPT_5_LOW_FAST,
     O3,
     GEMINI_2_5_PRO_PREVIEW_05_06,
     GEMINI_2_5_FLASH_PREVIEW_05_20,
@@ -714,75 +707,97 @@ const SUPPORTED_THINKING_MODELS: [&str; 20] = [
     GPT_5_NANO,
     O4_MINI,
     DEEPSEEK_R1_0528,
+    GROK_CODE_FAST_1,
     GROK_4,
+    GROK_4_FAST_REASONING,
     O3_PRO,
-    CLAUDE_4_OPUS_THINKING_LEGACY,
-    SONIC,
+    CODE_SUPERNOVA_1_MILLION,
+    GPT_5_CODEX,
 ];
 
 // 支持图像的模型（DEFAULT 始终支持）
-const SUPPORTED_IMAGE_MODELS: [&str; 28] = [
+const SUPPORTED_IMAGE_MODELS: [&str; 38] = [
     DEFAULT,
-    GPT_5,
-    GPT_5_HIGH,
-    GPT_5_LOW,
-    GPT_5_FAST,
-    GPT_5_HIGH_FAST,
-    GPT_5_LOW_FAST,
-    CLAUDE_4_SONNET_THINKING,
+    CLAUDE_4_5_SONNET,
+    CLAUDE_4_5_SONNET_THINKING,
     CLAUDE_4_SONNET,
-    CLAUDE_4_OPUS_THINKING,
+    CLAUDE_4_SONNET_THINKING,
+    CLAUDE_4_SONNET_1M,
+    CLAUDE_4_SONNET_1M_THINKING,
     CLAUDE_4_OPUS,
-    CLAUDE_3_5_SONNET,
+    CLAUDE_4_OPUS_THINKING,
+    CLAUDE_4_OPUS_LEGACY,
+    CLAUDE_4_OPUS_THINKING_LEGACY,
+    GPT_5,
+    GPT_5_FAST,
+    GPT_5_MEDIUM,
+    GPT_5_MEDIUM_FAST,
+    GPT_5_HIGH,
+    GPT_5_HIGH_FAST,
+    GPT_5_LOW,
+    GPT_5_LOW_FAST,
     O3,
     GEMINI_2_5_PRO_PREVIEW_05_06,
     GEMINI_2_5_FLASH_PREVIEW_05_20,
+    CLAUDE_3_5_SONNET,
     GPT_4_1,
     CLAUDE_3_7_SONNET,
     CLAUDE_3_7_SONNET_THINKING,
     GPT_5_MINI,
     GPT_5_NANO,
     CLAUDE_3_5_HAIKU,
-    GEMINI_2_5_PRO_EXP_03_25,
     GPT_4O,
     O4_MINI,
     GROK_4,
+    GROK_4_FAST_REASONING,
+    GROK_4_FAST_NON_REASONING,
     O3_PRO,
-    CLAUDE_4_OPUS_LEGACY,
-    CLAUDE_4_OPUS_THINKING_LEGACY,
+    CODE_SUPERNOVA_1_MILLION,
+    GPT_5_CODEX,
+    GEMINI_2_5_PRO_EXP_03_25,
 ];
 
 // 支持Max与非Max的模型
-const SUPPORTED_MAX_MODELS: [&str; 22] = [
-    GPT_5,
-    GPT_5_HIGH,
-    GPT_5_LOW,
-    GPT_5_FAST,
-    GPT_5_HIGH_FAST,
-    GPT_5_LOW_FAST,
-    CLAUDE_4_SONNET_THINKING,
+const SUPPORTED_MAX_MODELS: [&str; 30] = [
+    CLAUDE_4_5_SONNET,
+    CLAUDE_4_5_SONNET_THINKING,
     CLAUDE_4_SONNET,
-    CLAUDE_3_5_SONNET,
+    CLAUDE_4_SONNET_THINKING,
+    GPT_5,
+    GPT_5_FAST,
+    GPT_5_MEDIUM,
+    GPT_5_MEDIUM_FAST,
+    GPT_5_HIGH,
+    GPT_5_HIGH_FAST,
+    GPT_5_LOW,
+    GPT_5_LOW_FAST,
     O3,
     GEMINI_2_5_PRO_PREVIEW_05_06,
     GEMINI_2_5_FLASH_PREVIEW_05_20,
+    CLAUDE_3_5_SONNET,
     GPT_4_1,
     CLAUDE_3_7_SONNET,
     CLAUDE_3_7_SONNET_THINKING,
-    GEMINI_2_5_PRO_EXP_03_25,
     GPT_5_MINI,
     GPT_5_NANO,
     O4_MINI,
     GROK_3_BETA,
+    GROK_CODE_FAST_1,
     GROK_4,
-    SONIC,
+    GROK_4_FAST_REASONING,
+    GROK_4_FAST_NON_REASONING,
+    CODE_SUPERNOVA_1_MILLION,
+    GPT_5_CODEX,
+    GEMINI_2_5_PRO_EXP_03_25,
 ];
 
 // 只支持Max的模型
-const MAX_MODELS: [&str; 5] = [
-    CLAUDE_4_OPUS_THINKING,
+const MAX_MODELS: [&str; 7] = [
+    CLAUDE_4_SONNET_1M,
+    CLAUDE_4_SONNET_1M_THINKING,
     CLAUDE_4_OPUS,
-    O3_PRO,
+    CLAUDE_4_OPUS_THINKING,
     CLAUDE_4_OPUS_LEGACY,
     CLAUDE_4_OPUS_THINKING_LEGACY,
+    O3_PRO,
 ];

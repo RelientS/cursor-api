@@ -1,11 +1,10 @@
 // use ::bytes::{Buf as _, BytesMut};
 
-use ::std::borrow::Cow;
-
 use super::{
     decompress_gzip,
     types::{DecodedMessage, DecoderError, ProtobufMessage},
 };
+use alloc::borrow::Cow;
 
 // #[derive(Clone)]
 // pub struct DirectDecoder<T: ProtobufMessage> {

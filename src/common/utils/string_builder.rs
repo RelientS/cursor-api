@@ -7,11 +7,11 @@
 //! - Automatically transitions to store `Cow<'a, str>` if any owned string (`String`, `Cow::Owned`) is added.
 //! - Uses a sealed trait pattern for type safety.
 
-use ::core::{fmt::Debug, mem::MaybeUninit};
-use ::std::borrow::Cow;
+use core::{fmt::Debug, mem::MaybeUninit};
+use alloc::borrow::Cow;
 
 mod private {
-    use std::borrow::Cow;
+    use alloc::borrow::Cow;
     pub trait Sealed: Sized {}
 
     impl Sealed for &str {}
@@ -80,9 +80,9 @@ pub struct StringBuilder<'a> {
 impl<'a> StringBuilder<'a> {
     /// Creates a new, empty `StringBuilder` in `Borrowed` state.
     #[inline(always)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         StringBuilder {
-            storage: Storage::Borrowed(MaybeUninit::new(Vec::new())),
+            storage: Storage::new_borrowed(),
             total_len: 0,
         }
     }
@@ -312,7 +312,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
+    use alloc::borrow::Cow;
 
     use super::*;
 

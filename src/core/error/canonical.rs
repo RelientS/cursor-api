@@ -1,16 +1,18 @@
+// use crate::common::model::{ApiStatus, GenericError};
 use crate::{
-    app::constant::UNKNOWN,
-    common::model::{ApiStatus, GenericError},
+    app::{constant::UNKNOWN, model::ErrorInfo},
     core::{
         aiserver::v1::{CustomErrorDetails, ErrorDetails},
         model::{anthropic, openai},
     },
 };
+use ::core::num::NonZeroU16;
+use interned::Str;
 
 pub struct CanonicalError {
     pub code: Option<String>,
     pub details: Option<CustomErrorDetails>,
-    pub status_code: u16,
+    pub status_code: NonZeroU16,
     pub r#type: &'static str,
 }
 
@@ -32,7 +34,7 @@ impl CanonicalError {
         Self {
             code: None,
             details: None,
-            status_code: 500,
+            status_code: unsafe { NonZeroU16::new_unchecked(500) },
             r#type: UNKNOWN,
         }
     }
@@ -49,7 +51,7 @@ impl ::core::iter::Sum for CanonicalError {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         let mut code: Option<String> = None;
         let mut details: Option<CustomErrorDetails> = None;
-        let mut status_code = 0;
+        let mut status_code = unsafe { NonZeroU16::new_unchecked(100) };
         let mut r#type = UNKNOWN;
 
         for e in iter {
@@ -73,12 +75,7 @@ impl ::core::iter::Sum for CanonicalError {
             }
         }
 
-        Self {
-            code,
-            details,
-            status_code,
-            r#type,
-        }
+        Self { code, details, status_code, r#type }
     }
 }
 
@@ -97,46 +94,42 @@ impl CanonicalError {
     }
 
     #[inline]
-    pub fn status_code(&self) -> ::http::StatusCode {
-        unsafe {
-            ::core::intrinsics::transmute_unchecked(crate::app::constant::status::StatusCode(
-                self.status_code,
-            ))
-        }
+    pub fn status_code(&self) -> http::StatusCode {
+        unsafe { ::core::intrinsics::transmute(self.status_code) }
     }
 
+    // #[inline]
+    // pub fn into_generic(self) -> GenericError {
+    //     use alloc::borrow::Cow;
+
+    //     let code = match self.code {
+    //         Some(code) => Cow::Owned(code),
+    //         None => Cow::Borrowed(UNKNOWN),
+    //     };
+
+    //     let message = if let Some(details) = self.details {
+    //         #[derive(::serde::Serialize)]
+    //         struct Message {
+    //             code: Cow<'static, str>,
+    //             details: CustomErrorDetails,
+    //         }
+
+    //         Cow::Owned(__unwrap!(serde_json::to_string(&Message { code, details })))
+    //     } else {
+    //         code
+    //     };
+
+    //     GenericError {
+    //         status: ApiStatus::Error,
+    //         code: Some(unsafe { core::intrinsics::transmute(self.status_code) }),
+    //         error: Some(Cow::Borrowed(self.r#type)),
+    //         message: Some(message),
+    //     }
+    // }
+
     #[inline]
-    pub fn into_generic(self) -> GenericError {
-        use std::borrow::Cow;
-
-        let code = match self.code {
-            Some(code) => Cow::Owned(code),
-            None => Cow::Borrowed(UNKNOWN),
-        };
-
-        let message = if let Some(details) = self.details {
-            #[derive(::serde::Serialize)]
-            struct Message {
-                code: Cow<'static, str>,
-                details: CustomErrorDetails,
-            }
-
-            Cow::Owned(__unwrap!(serde_json::to_string(&Message { code, details })))
-        } else {
-            code
-        };
-
-        GenericError {
-            status: ApiStatus::Error,
-            code: Some(self.status_code),
-            error: Some(Cow::Borrowed(self.r#type)),
-            message: Some(message),
-        }
-    }
-
-    #[inline]
-    pub fn into_openai(self) -> openai::OpenAiError {
-        use std::borrow::Cow;
+    pub fn into_openai(self) -> openai::OpenAiErrorInner {
+        use alloc::borrow::Cow;
 
         let message = if let Some(details) = self.details {
             Cow::Owned(__unwrap!(serde_json::to_string(&details)))
@@ -144,16 +137,12 @@ impl CanonicalError {
             Cow::Borrowed(UNKNOWN)
         };
 
-        openai::ErrorDetail {
-            code: self.code.map(Cow::Owned),
-            message,
-        }
-        .into_openai()
+        openai::OpenAiErrorInner { code: self.code.map(Cow::Owned), message }
     }
 
     #[inline]
-    pub fn into_anthropic(self) -> anthropic::AnthropicError {
-        use std::borrow::Cow;
+    pub fn into_anthropic(self) -> anthropic::AnthropicErrorInner {
+        use alloc::borrow::Cow;
 
         let code = match self.code {
             Some(code) => Cow::Owned(code),
@@ -172,10 +161,14 @@ impl CanonicalError {
             code
         };
 
-        anthropic::ErrorDetail {
-            r#type: self.r#type,
-            message,
-        }
-        .into_anthropic()
+        anthropic::AnthropicErrorInner { r#type: self.r#type, message }
+    }
+
+    #[inline]
+    pub fn to_error_info(&self) -> ErrorInfo {
+        ErrorInfo::new(
+            self.title().map(Str::new).unwrap_or(Str::from_static(UNKNOWN)),
+            self.detail().map(Str::new),
+        )
     }
 }

@@ -1,8 +1,8 @@
-use crate::{
-    app::constant::{COMMA, COMMA_STRING},
-    core::{config::key_config, constant::Models},
-};
 use serde::{Deserialize, Serialize};
+
+use crate::app::constant::{COMMA, COMMA_STRING};
+use crate::core::config::configured_key;
+use crate::core::constant::Models;
 
 // 定义类型常量
 crate::define_typed_constants! {
@@ -48,18 +48,14 @@ impl UsageCheck {
             .map(|m| m.id)
             .collect();
 
-        if models.is_empty() {
-            Self::default()
-        } else {
-            Self::Custom(models)
-        }
+        if models.is_empty() { Self::default() } else { Self::Custom(models) }
     }
 
     #[inline]
-    pub fn from_proto(model: &key_config::UsageCheckModel) -> Self {
-        use key_config::usage_check_model::Type;
+    pub fn from_proto(model: &configured_key::UsageCheckModel) -> Self {
+        use configured_key::usage_check_model::Type;
 
-        match Type::try_from(model.r#type).unwrap_or(Type::Default) {
+        match model.r#type {
             Type::Default | Type::Disabled => Self::None,
             Type::All => Self::All,
             Type::Custom => {
@@ -70,11 +66,7 @@ impl UsageCheck {
                     .map(|m| m.id)
                     .collect();
 
-                if models.is_empty() {
-                    Self::None
-                } else {
-                    Self::Custom(models)
-                }
+                if models.is_empty() { Self::None } else { Self::Custom(models) }
             }
         }
     }
@@ -98,9 +90,7 @@ impl const Default for UsageCheck {
 
 impl Serialize for UsageCheck {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+    where S: serde::Serializer {
         use serde::ser::SerializeStruct;
 
         match self {
@@ -121,9 +111,7 @@ impl Serialize for UsageCheck {
 
 impl<'de> Deserialize<'de> for UsageCheck {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         use serde::de::{self, MapAccess, Visitor};
 
         struct UsageCheckVisitor;
@@ -136,9 +124,7 @@ impl<'de> Deserialize<'de> for UsageCheck {
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
+            where A: MapAccess<'de> {
                 let mut type_value: Option<String> = None;
                 let mut content_value: Option<String> = None;
 
@@ -174,12 +160,10 @@ impl<'de> Deserialize<'de> for UsageCheck {
                         }
                     }
                     _ => {
-                        return Err(de::Error::unknown_variant(&type_str, &[
-                            TYPE_NONE,
-                            TYPE_DEFAULT,
-                            TYPE_ALL,
-                            TYPE_LIST,
-                        ]));
+                        return Err(de::Error::unknown_variant(
+                            &type_str,
+                            &[TYPE_NONE, TYPE_DEFAULT, TYPE_ALL, TYPE_LIST],
+                        ));
                     }
                 })
             }

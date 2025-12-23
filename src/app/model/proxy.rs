@@ -1,4 +1,3 @@
-use ahash::{HashMap, HashSet};
 use std::{borrow::Cow, sync::Arc};
 
 use super::{
@@ -6,6 +5,9 @@ use super::{
     proxy_pool::{Proxies, SingleProxy},
 };
 use serde::{Deserialize, Serialize};
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
+type HashSet<K> = hashbrown::HashSet<K, ahash::RandomState>;
 
 // 代理信息响应
 #[derive(Serialize)]

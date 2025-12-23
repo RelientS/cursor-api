@@ -1,51 +1,17 @@
 #[cfg(any(feature = "native-tls", feature = "__rustls",))]
 use std::any::Any;
-#[cfg(feature = "http2")]
-use std::error::Error;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
-use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
+use std::collections::HashMap;
+use std::convert::TryInto;
 use std::{fmt, str};
 
-use super::decoder::Accepts;
-use super::request::{Request, RequestBuilder};
-use super::response::Response;
-use super::Body;
-#[cfg(feature = "http3")]
-use crate::async_impl::h3_client::connect::{H3ClientConfig, H3Connector};
-#[cfg(feature = "http3")]
-use crate::async_impl::h3_client::H3Client;
-use crate::config::{RequestConfig, RequestTimeout};
-use crate::connect::{
-    sealed::{Conn, Unnameable},
-    BoxedConnectorLayer, BoxedConnectorService, Connector, ConnectorBuilder,
-};
-#[cfg(feature = "cookies")]
-use crate::cookie;
-#[cfg(feature = "hickory-dns")]
-use crate::dns::hickory::HickoryDnsResolver;
-use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
-use crate::error::{self, BoxError};
-use crate::into_url::try_uri;
-use crate::proxy::Matcher as ProxyMatcher;
-use crate::redirect::{self, TowerRedirectPolicy};
-#[cfg(feature = "__rustls")]
-use crate::tls::CertificateRevocationList;
-#[cfg(feature = "__tls")]
-use crate::tls::{self, TlsBackend};
-#[cfg(feature = "__tls")]
-use crate::Certificate;
-#[cfg(any(feature = "native-tls", feature = "__rustls"))]
-use crate::Identity;
-use crate::{IntoUrl, Method, Proxy, Url};
-
-use bytes::Bytes;
 use http::header::{
-    Entry, HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, PROXY_AUTHORIZATION, RANGE, USER_AGENT,
+    ACCEPT, ACCEPT_ENCODING, Entry, HeaderMap, HeaderValue, PROXY_AUTHORIZATION, RANGE, USER_AGENT,
 };
 use http::uri::Scheme;
 use http::Uri;
@@ -62,17 +28,59 @@ use tower::util::BoxCloneSyncServiceLayer;
 use tower::{Layer, Service};
 use tower_http::follow_redirect::FollowRedirect;
 
+use super::decoder::Accepts;
+use super::request::{Request, RequestBuilder};
+use super::response::Response;
+use super::Body;
+#[cfg(feature = "http3")]
+use crate::async_impl::h3_client::connect::{H3ClientConfig, H3Connector};
+#[cfg(feature = "http3")]
+use crate::async_impl::h3_client::H3Client;
+use crate::config::{RequestConfig, TotalTimeout};
+#[cfg(unix)]
+use crate::connect::uds::UnixSocketProvider;
+use crate::connect::{BoxedConnectorLayer, BoxedConnectorService, Connector, ConnectorBuilder};
+use crate::connect::sealed::{Conn, Unnameable};
+#[cfg(feature = "cookies")]
+use crate::cookie;
+#[cfg(feature = "cookies")]
+use crate::cookie::service::CookieService;
+#[cfg(feature = "hickory-dns")]
+use crate::dns::hickory::HickoryDnsResolver;
+use crate::dns::{DnsResolverWithOverrides, DynResolver, Resolve};
+use crate::dns::gai::GaiResolver;
+use crate::error::{self, BoxError};
+use crate::into_url::try_uri;
+use crate::proxy::Matcher as ProxyMatcher;
+use crate::redirect::{self, TowerRedirectPolicy};
+#[cfg(feature = "__rustls")]
+use crate::tls::CertificateRevocationList;
+#[cfg(feature = "__tls")]
+use crate::tls::{self, TlsBackend};
+#[cfg(feature = "__tls")]
+use crate::Certificate;
+#[cfg(any(feature = "native-tls", feature = "__rustls"))]
+use crate::Identity;
+use crate::{IntoUrl, Method, Proxy, Url};
+
 /// An asynchronous `Client` to make Requests with.
 ///
 /// The Client has various configuration values to tweak, but the defaults
 /// are set to what is usually the most commonly desired value. To configure a
 /// `Client`, use `Client::builder()`.
 ///
-/// The `Client` holds a connection pool internally, so it is advised that
+/// The `Client` holds a connection pool internally to improve performance
+/// by reusing connections and avoiding setup overhead, so it is advised that
 /// you create one and **reuse** it.
 ///
 /// You do **not** have to wrap the `Client` in an [`Rc`] or [`Arc`] to **reuse** it,
 /// because it already uses an [`Arc`] internally.
+///
+/// # Connection Pooling
+///
+/// The connection pool can be configured using [`ClientBuilder`] methods
+/// with the `pool_` prefix, such as [`ClientBuilder::pool_idle_timeout`]
+/// and [`ClientBuilder::pool_max_idle_per_host`].
 ///
 /// [`Rc`]: std::rc::Rc
 #[derive(Clone)]
@@ -97,8 +105,6 @@ enum HttpVersionPref {
 
 #[derive(Clone)]
 struct HyperService {
-    #[cfg(feature = "cookies")]
-    cookie_store: Option<Arc<dyn cookie::CookieStore>>,
     hyper: HyperClient,
 }
 
@@ -111,42 +117,10 @@ impl Service<hyper::Request<crate::async_impl::body::Body>> for HyperService {
         self.hyper.poll_ready(cx).map_err(crate::error::request)
     }
 
-    #[cfg(not(feature = "cookies"))]
     fn call(&mut self, req: hyper::Request<crate::async_impl::body::Body>) -> Self::Future {
         let clone = self.hyper.clone();
         let mut inner = std::mem::replace(&mut self.hyper, clone);
         Box::pin(async move { inner.call(req).await.map_err(crate::error::request) })
-    }
-
-    #[cfg(feature = "cookies")]
-    fn call(&mut self, mut req: hyper::Request<crate::async_impl::body::Body>) -> Self::Future {
-        let clone = self.hyper.clone();
-        let mut inner = std::mem::replace(&mut self.hyper, clone);
-        let url = Url::parse(req.uri().to_string().as_str()).expect("invalid URL");
-
-        if let Some(cookie_store) = self.cookie_store.as_ref() {
-            if req.headers().get(crate::header::COOKIE).is_none() {
-                let headers = req.headers_mut();
-                crate::util::add_cookie_header(headers, &**cookie_store, &url);
-            }
-        }
-
-        let cookie_store = self.cookie_store.clone();
-        Box::pin(async move {
-            let res = inner.call(req).await.map_err(crate::error::request);
-
-            if let Some(ref cookie_store) = cookie_store {
-                if let Ok(res) = &res {
-                    let mut cookies =
-                        cookie::extract_response_cookie_headers(res.headers()).peekable();
-                    if cookies.peek().is_some() {
-                        cookie_store.set_cookies(&mut cookies, &url);
-                    }
-                }
-            }
-
-            res
-        })
     }
 }
 
@@ -174,6 +148,7 @@ struct Config {
     proxies: Vec<ProxyMatcher>,
     auto_sys_proxy: bool,
     redirect_policy: redirect::Policy,
+    retry_policy: crate::retry::Builder,
     referer: bool,
     read_timeout: Option<Duration>,
     timeout: Option<Duration>,
@@ -256,12 +231,13 @@ struct Config {
     h3_send_grease: Option<bool>,
     dns_overrides: HashMap<String, Vec<SocketAddr>>,
     dns_resolver: Option<Arc<dyn Resolve>>,
+
+    #[cfg(unix)]
+    unix_socket: Option<Arc<std::path::Path>>,
 }
 
 impl Default for ClientBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl ClientBuilder {
@@ -287,16 +263,15 @@ impl ClientBuilder {
                 connection_verbose: false,
                 pool_idle_timeout: Some(Duration::from_secs(90)),
                 pool_max_idle_per_host: usize::MAX,
-                // TODO: Re-enable default duration once hyper's HttpConnector is fixed
-                // to no longer error when an option fails.
-                tcp_keepalive: None, //Some(Duration::from_secs(60)),
-                tcp_keepalive_interval: None,
-                tcp_keepalive_retries: None,
+                tcp_keepalive: Some(Duration::from_secs(15)),
+                tcp_keepalive_interval: Some(Duration::from_secs(15)),
+                tcp_keepalive_retries: Some(3),
                 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-                tcp_user_timeout: None,
+                tcp_user_timeout: Some(Duration::from_secs(30)),
                 proxies: Vec::new(),
                 auto_sys_proxy: true,
                 redirect_policy: redirect::Policy::default(),
+                retry_policy: crate::retry::Builder::default(),
                 referer: true,
                 read_timeout: None,
                 timeout: None,
@@ -380,6 +355,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 h3_send_grease: None,
                 dns_resolver: None,
+                #[cfg(unix)]
+                unix_socket: None,
             },
         }
     }
@@ -421,10 +398,7 @@ impl ClientBuilder {
                 resolver = dns_resolver;
             }
             if !config.dns_overrides.is_empty() {
-                resolver = Arc::new(DnsResolverWithOverrides::new(
-                    resolver,
-                    config.dns_overrides,
-                ));
+                resolver = Arc::new(DnsResolverWithOverrides::new(resolver, config.dns_overrides));
             }
             DynResolver::new(resolver)
         };
@@ -766,21 +740,15 @@ impl ClientBuilder {
                             .dangerous()
                             .with_custom_certificate_verifier(Arc::new(NoVerifier))
                     } else if !config.hostname_verification {
-                        config_builder
-                            .dangerous()
-                            .with_custom_certificate_verifier(Arc::new(IgnoreHostname::new(
-                                root_cert_store,
-                                signature_algorithms,
-                            )))
+                        config_builder.dangerous().with_custom_certificate_verifier(Arc::new(
+                            IgnoreHostname::new(root_cert_store, signature_algorithms),
+                        ))
                     } else {
                         if config.crls.is_empty() {
                             config_builder.with_root_certificates(root_cert_store)
                         } else {
-                            let crls = config
-                                .crls
-                                .iter()
-                                .map(|e| e.as_rustls_crl())
-                                .collect::<Vec<_>>();
+                            let crls =
+                                config.crls.iter().map(|e| e.as_rustls_crl()).collect::<Vec<_>>();
                             let verifier =
                                 rustls::client::WebPkiServerVerifier::builder_with_provider(
                                     Arc::new(root_cert_store),
@@ -909,6 +877,12 @@ impl ClientBuilder {
         #[cfg(feature = "socks")]
         connector_builder.set_socks_resolver(resolver);
 
+        // TODO: It'd be best to refactor this so the HttpConnector is never
+        // constructed at all. But there's a lot of code for all the different
+        // ways TLS can be configured...
+        #[cfg(unix)]
+        connector_builder.set_unix_socket(config.unix_socket);
+
         let mut builder =
             hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new());
         #[cfg(feature = "http2")]
@@ -982,20 +956,21 @@ impl ClientBuilder {
         };
 
         let hyper_client = builder.build(connector_builder.build(config.connector_layers));
-        let hyper_service = HyperService {
-            #[cfg(feature = "cookies")]
-            cookie_store: config.cookie_store.clone(),
-            hyper: hyper_client,
-        };
+        let hyper_service = HyperService { hyper: hyper_client };
 
-        let policy = {
+        let redirect_policy = {
             let mut p = TowerRedirectPolicy::new(config.redirect_policy);
-            p.with_referer(config.referer)
-                .with_https_only(config.https_only);
+            p.with_referer(config.referer).with_https_only(config.https_only);
             p
         };
 
-        let hyper = FollowRedirect::with_policy(hyper_service, policy.clone());
+        let retry_policy = config.retry_policy.into_policy();
+
+        let svc = tower::retry::Retry::new(retry_policy.clone(), hyper_service);
+
+        #[cfg(feature = "cookies")]
+        let svc = CookieService::new(svc, config.cookie_store.clone());
+        let hyper = FollowRedirect::with_policy(svc, redirect_policy.clone());
 
         Ok(Client {
             inner: Arc::new(ClientRef {
@@ -1007,22 +982,18 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 h3_client: match h3_connector {
                     Some(h3_connector) => {
-                        #[cfg(not(feature = "cookies"))]
                         let h3_service = H3Client::new(h3_connector, config.pool_idle_timeout);
+                        let svc = tower::retry::Retry::new(retry_policy, h3_service);
                         #[cfg(feature = "cookies")]
-                        let h3_service = H3Client::new(
-                            h3_connector,
-                            config.pool_idle_timeout,
-                            config.cookie_store,
-                        );
-                        Some(FollowRedirect::with_policy(h3_service, policy))
+                        let svc = CookieService::new(svc, config.cookie_store);
+                        Some(FollowRedirect::with_policy(svc, redirect_policy))
                     }
                     None => None,
                 },
                 headers: config.headers,
                 referer: config.referer,
                 read_timeout: config.read_timeout,
-                request_timeout: RequestConfig::new(config.timeout),
+                total_timeout: RequestConfig::new(config.timeout),
                 hyper,
                 proxies,
                 proxies_maybe_http_auth,
@@ -1326,6 +1297,17 @@ impl ClientBuilder {
         self
     }
 
+    // Retry options
+
+    /// Set a request retry policy.
+    ///
+    /// Default behavior is to retry protocol NACKs.
+    // XXX: accept an `impl retry::IntoPolicy` instead?
+    pub fn retry(mut self, policy: crate::retry::Builder) -> ClientBuilder {
+        self.config.retry_policy = policy;
+        self
+    }
+
     // Proxy options
 
     /// Add a `Proxy` to the list of proxies the `Client` will use.
@@ -1409,14 +1391,14 @@ impl ClientBuilder {
     ///
     /// Default is 90 seconds.
     pub fn pool_idle_timeout<D>(mut self, val: D) -> ClientBuilder
-    where
-        D: Into<Option<Duration>>,
-    {
+    where D: Into<Option<Duration>> {
         self.config.pool_idle_timeout = val.into();
         self
     }
 
     /// Sets the maximum idle connection per host allowed in the pool.
+    ///
+    /// Default is `usize::MAX` (no limit).
     pub fn pool_max_idle_per_host(mut self, max: usize) -> ClientBuilder {
         self.config.pool_max_idle_per_host = max;
         self
@@ -1437,8 +1419,7 @@ impl ClientBuilder {
         mut self,
         value: bool,
     ) -> ClientBuilder {
-        self.config
-            .http1_allow_obsolete_multiline_headers_in_responses = value;
+        self.config.http1_allow_obsolete_multiline_headers_in_responses = value;
         self
     }
 
@@ -1457,8 +1438,7 @@ impl ClientBuilder {
         mut self,
         value: bool,
     ) -> ClientBuilder {
-        self.config
-            .http1_allow_spaces_after_header_name_in_responses = value;
+        self.config.http1_allow_spaces_after_header_name_in_responses = value;
         self
     }
 
@@ -1608,9 +1588,7 @@ impl ClientBuilder {
     /// # }
     /// ```
     pub fn local_address<T>(mut self, addr: T) -> ClientBuilder
-    where
-        T: Into<Option<IpAddr>>,
-    {
+    where T: Into<Option<IpAddr>> {
         self.config.local_address = addr.into();
         self
     }
@@ -1668,9 +1646,7 @@ impl ClientBuilder {
     ///
     /// If `None`, the option will not be set.
     pub fn tcp_keepalive<D>(mut self, val: D) -> ClientBuilder
-    where
-        D: Into<Option<Duration>>,
-    {
+    where D: Into<Option<Duration>> {
         self.config.tcp_keepalive = val.into();
         self
     }
@@ -1679,9 +1655,7 @@ impl ClientBuilder {
     ///
     /// If `None`, the option will not be set.
     pub fn tcp_keepalive_interval<D>(mut self, val: D) -> ClientBuilder
-    where
-        D: Into<Option<Duration>>,
-    {
+    where D: Into<Option<Duration>> {
         self.config.tcp_keepalive_interval = val.into();
         self
     }
@@ -1690,9 +1664,7 @@ impl ClientBuilder {
     ///
     /// If `None`, the option will not be set.
     pub fn tcp_keepalive_retries<C>(mut self, retries: C) -> ClientBuilder
-    where
-        C: Into<Option<u32>>,
-    {
+    where C: Into<Option<u32>> {
         self.config.tcp_keepalive_retries = retries.into();
         self
     }
@@ -1702,13 +1674,30 @@ impl ClientBuilder {
     /// This option controls how long transmitted data may remain unacknowledged before
     /// the connection is force-closed.
     ///
-    /// The current default is `None` (option disabled).
+    /// If `None`, the option will not be set.
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     pub fn tcp_user_timeout<D>(mut self, val: D) -> ClientBuilder
-    where
-        D: Into<Option<Duration>>,
-    {
+    where D: Into<Option<Duration>> {
         self.config.tcp_user_timeout = val.into();
+        self
+    }
+
+    // Alt Transports
+
+    /// Set that all connections will use this Unix socket.
+    ///
+    /// If a request URI uses the `https` scheme, TLS will still be used over
+    /// the Unix socket.
+    ///
+    /// # Note
+    ///
+    /// This option is not compatible with any of the TCP or Proxy options.
+    /// Setting this will ignore all those options previously set.
+    ///
+    /// Likewise, DNS resolution will not be done on the domain name.
+    #[cfg(unix)]
+    pub fn unix_socket(mut self, path: impl UnixSocketProvider) -> ClientBuilder {
+        self.config.unix_socket = Some(path.reqwest_uds_path(crate::connect::uds::Internal).into());
         self
     }
 
@@ -1726,11 +1715,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn add_root_certificate(mut self, cert: Certificate) -> ClientBuilder {
         self.config.root_certs.push(cert);
@@ -1786,11 +1771,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn tls_built_in_root_certs(mut self, tls_built_in_root_certs: bool) -> ClientBuilder {
         self.config.tls_built_in_root_certs = tls_built_in_root_certs;
@@ -1859,11 +1840,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn danger_accept_invalid_hostnames(
         mut self,
@@ -1892,11 +1869,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn danger_accept_invalid_certs(mut self, accept_invalid_certs: bool) -> ClientBuilder {
         self.config.certs_verification = !accept_invalid_certs;
@@ -1914,11 +1887,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn tls_sni(mut self, tls_sni: bool) -> ClientBuilder {
         self.config.tls_sni = tls_sni;
@@ -1943,11 +1912,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn min_tls_version(mut self, version: tls::Version) -> ClientBuilder {
         self.config.min_tls_version = Some(version);
@@ -1975,11 +1940,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn max_tls_version(mut self, version: tls::Version) -> ClientBuilder {
         self.config.max_tls_version = Some(version);
@@ -2073,11 +2034,7 @@ impl ClientBuilder {
     #[cfg(feature = "__tls")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "default-tls",
-            feature = "native-tls",
-            feature = "rustls-tls"
-        )))
+        doc(cfg(any(feature = "default-tls", feature = "native-tls", feature = "rustls-tls")))
     )]
     pub fn tls_info(mut self, tls_info: bool) -> ClientBuilder {
         self.config.tls_info = tls_info;
@@ -2123,9 +2080,7 @@ impl ClientBuilder {
 
     #[doc(hidden)]
     #[deprecated(note = "use `no_hickory_dns` instead")]
-    pub fn no_trust_dns(self) -> ClientBuilder {
-        self.no_hickory_dns()
-    }
+    pub fn no_trust_dns(self) -> ClientBuilder { self.no_hickory_dns() }
 
     /// Disables the hickory-dns async resolver.
     ///
@@ -2157,19 +2112,29 @@ impl ClientBuilder {
     /// Set the port to `0` to use the conventional port for the given scheme (e.g. 80 for http).
     /// Ports in the URL itself will always be used instead of the port in the overridden addr.
     pub fn resolve_to_addrs(mut self, domain: &str, addrs: &[SocketAddr]) -> ClientBuilder {
-        self.config
-            .dns_overrides
-            .insert(domain.to_ascii_lowercase(), addrs.to_vec());
+        self.config.dns_overrides.insert(domain.to_ascii_lowercase(), addrs.to_vec());
         self
     }
 
     /// Override the DNS resolver implementation.
     ///
-    /// Pass an `Arc` wrapping a trait object implementing `Resolve`.
+    /// Pass an `Arc` wrapping a type implementing `Resolve`.
     /// Overrides for specific names passed to `resolve` and `resolve_to_addrs` will
     /// still be applied on top of this resolver.
     pub fn dns_resolver<R: Resolve + 'static>(mut self, resolver: Arc<R>) -> ClientBuilder {
         self.config.dns_resolver = Some(resolver as _);
+        self
+    }
+
+    /// Override the DNS resolver implementation.
+    ///
+    /// Overrides for specific names passed to `resolve` and `resolve_to_addrs` will
+    /// still be applied on top of this resolver.
+    ///
+    /// This method will replace `dns_resolver` in the next breaking change.
+    pub fn dns_resolver2<R>(mut self, resolver: R) -> ClientBuilder
+    where R: crate::dns::resolve::IntoResolve {
+        self.config.dns_resolver = Some(resolver.into_resolve());
         self
     }
 
@@ -2331,9 +2296,7 @@ impl ClientBuilder {
 type HyperClient = hyper_util::client::legacy::Client<Connector, super::Body>;
 
 impl Default for Client {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Client {
@@ -2346,70 +2309,54 @@ impl Client {
     ///
     /// Use `Client::builder()` if you wish to handle the failure as an `Error`
     /// instead of panicking.
-    pub fn new() -> Client {
-        ClientBuilder::new().build().expect("Client::new()")
-    }
+    pub fn new() -> Client { ClientBuilder::new().build().expect("Client::new()") }
 
     /// Creates a `ClientBuilder` to configure a `Client`.
     ///
     /// This is the same as `ClientBuilder::new()`.
-    pub fn builder() -> ClientBuilder {
-        ClientBuilder::new()
-    }
+    pub fn builder() -> ClientBuilder { ClientBuilder::new() }
 
     /// Convenience method to make a `GET` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.request(Method::GET, url)
-    }
+    pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::GET, url) }
 
     /// Convenience method to make a `POST` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn post<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.request(Method::POST, url)
-    }
+    pub fn post<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::POST, url) }
 
     /// Convenience method to make a `PUT` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn put<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.request(Method::PUT, url)
-    }
+    pub fn put<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::PUT, url) }
 
     /// Convenience method to make a `PATCH` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn patch<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.request(Method::PATCH, url)
-    }
+    pub fn patch<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::PATCH, url) }
 
     /// Convenience method to make a `DELETE` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn delete<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.request(Method::DELETE, url)
-    }
+    pub fn delete<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::DELETE, url) }
 
     /// Convenience method to make a `HEAD` request to a URL.
     ///
     /// # Errors
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
-    pub fn head<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.request(Method::HEAD, url)
-    }
+    pub fn head<U: IntoUrl>(&self, url: U) -> RequestBuilder { self.request(Method::HEAD, url) }
 
     /// Start building a `Request` with the `Method` and `Url`.
     ///
@@ -2475,21 +2422,12 @@ impl Client {
             _ => return Pending::new_err(error::url_invalid_uri(url)),
         };
 
-        let (reusable, body) = match body {
-            Some(body) => {
-                let (reusable, body) = body.try_reuse();
-                (Some(reusable), body)
-            }
-            None => (None, Body::empty()),
-        };
+        let body = body.unwrap_or_else(Body::empty);
 
         self.proxy_auth(&uri, &mut headers);
         self.proxy_custom_headers(&uri, &mut headers);
 
-        let builder = hyper::Request::builder()
-            .method(method.clone())
-            .uri(uri)
-            .version(version);
+        let builder = hyper::Request::builder().method(method.clone()).uri(uri).version(version);
 
         let in_flight = match version {
             #[cfg(feature = "http3")]
@@ -2509,26 +2447,19 @@ impl Client {
 
         let total_timeout = self
             .inner
-            .request_timeout
+            .total_timeout
             .fetch(&extensions)
             .copied()
             .map(tokio::time::sleep)
             .map(Box::pin);
 
-        let read_timeout_fut = self
-            .inner
-            .read_timeout
-            .map(tokio::time::sleep)
-            .map(Box::pin);
+        let read_timeout_fut = self.inner.read_timeout.map(tokio::time::sleep).map(Box::pin);
 
         Pending {
             inner: PendingInner::Request(Box::pin(PendingRequest {
                 method,
                 url,
                 headers,
-                body: reusable,
-
-                retry_count: 0,
 
                 client: self.inner.clone(),
 
@@ -2586,9 +2517,7 @@ impl Client {
 
 unsafe impl ::arc_swap::RefCnt for Client {
     type Base = ClientRef;
-    fn into_ptr(me: Self) -> *mut Self::Base {
-        Arc::into_raw(me.inner) as *mut Self::Base
-    }
+    fn into_ptr(me: Self) -> *mut Self::Base { Arc::into_raw(me.inner) as *mut Self::Base }
     fn as_ptr(me: &Self) -> *mut Self::Base {
         // Slightly convoluted way to do this, but this avoids stacked borrows violations. The same
         // intention as
@@ -2614,11 +2543,7 @@ unsafe impl ::arc_swap::RefCnt for Client {
 
         ptr
     }
-    unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
-        Client {
-            inner: Arc::from_raw(ptr)
-        }
-    }
+    unsafe fn from_ptr(ptr: *const Self::Base) -> Self { Client { inner: Arc::from_raw(ptr) } }
 }
 
 impl fmt::Debug for Client {
@@ -2638,9 +2563,7 @@ impl tower_service::Service<Request> for Client {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
-        self.execute_request(req)
-    }
+    fn call(&mut self, req: Request) -> Self::Future { self.execute_request(req) }
 }
 
 impl tower_service::Service<Request> for &'_ Client {
@@ -2652,9 +2575,7 @@ impl tower_service::Service<Request> for &'_ Client {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request) -> Self::Future {
-        self.execute_request(req)
-    }
+    fn call(&mut self, req: Request) -> Self::Future { self.execute_request(req) }
 }
 
 impl fmt::Debug for ClientBuilder {
@@ -2791,8 +2712,23 @@ impl Config {
                 f.field("tls_enable_early_data", &true);
             }
         }
+
+        #[cfg(unix)]
+        if let Some(ref p) = self.unix_socket {
+            f.field("unix_socket", p);
+        }
     }
 }
+
+#[cfg(not(feature = "cookies"))]
+type LayeredService<T> =
+    FollowRedirect<tower::retry::Retry<crate::retry::Policy, T>, TowerRedirectPolicy>;
+#[cfg(feature = "cookies")]
+type LayeredService<T> = FollowRedirect<
+    CookieService<tower::retry::Retry<crate::retry::Policy, T>>,
+    TowerRedirectPolicy,
+>;
+type LayeredFuture<T> = <LayeredService<T> as Service<http::Request<Body>>>::Future;
 
 #[allow(missing_debug_implementations)]
 pub struct ClientRef {
@@ -2800,11 +2736,11 @@ pub struct ClientRef {
     #[cfg(feature = "cookies")]
     cookie_store: Option<Arc<dyn cookie::CookieStore>>,
     headers: HeaderMap,
-    hyper: FollowRedirect<HyperService, TowerRedirectPolicy>,
+    hyper: LayeredService<HyperService>,
     #[cfg(feature = "http3")]
-    h3_client: Option<FollowRedirect<H3Client, TowerRedirectPolicy>>,
+    h3_client: Option<LayeredService<H3Client>>,
     referer: bool,
-    request_timeout: RequestConfig<RequestTimeout>,
+    total_timeout: RequestConfig<TotalTimeout>,
     read_timeout: Option<Duration>,
     proxies: Arc<Vec<ProxyMatcher>>,
     proxies_maybe_http_auth: bool,
@@ -2841,7 +2777,7 @@ impl ClientRef {
 
         f.field("default_headers", &self.headers);
 
-        self.request_timeout.fmt_as_field(f);
+        self.total_timeout.fmt_as_field(f);
 
         if let Some(ref d) = self.read_timeout {
             f.field("read_timeout", d);
@@ -2866,9 +2802,6 @@ pin_project! {
         method: Method,
         url: Url,
         headers: HeaderMap,
-        body: Option<Option<Bytes>>,
-
-        retry_count: usize,
 
         client: Arc<ClientRef>,
 
@@ -2883,15 +2816,13 @@ pin_project! {
 }
 
 enum ResponseFuture {
-    Default(tower_http::follow_redirect::ResponseFuture<HyperService, Body, TowerRedirectPolicy>),
+    Default(LayeredFuture<HyperService>),
     #[cfg(feature = "http3")]
-    H3(tower_http::follow_redirect::ResponseFuture<H3Client, Body, TowerRedirectPolicy>),
+    H3(LayeredFuture<H3Client>),
 }
 
 impl PendingRequest {
-    fn in_flight(self: Pin<&mut Self>) -> Pin<&mut ResponseFuture> {
-        self.project().in_flight
-    }
+    fn in_flight(self: Pin<&mut Self>) -> Pin<&mut ResponseFuture> { self.project().in_flight }
 
     fn total_timeout(self: Pin<&mut Self>) -> Pin<&mut Option<Pin<Box<Sleep>>>> {
         self.project().total_timeout
@@ -2900,115 +2831,14 @@ impl PendingRequest {
     fn read_timeout(self: Pin<&mut Self>) -> Pin<&mut Option<Pin<Box<Sleep>>>> {
         self.project().read_timeout_fut
     }
-
-    #[cfg(any(feature = "http2", feature = "http3"))]
-    fn retry_error(mut self: Pin<&mut Self>, err: &(dyn std::error::Error + 'static)) -> bool {
-        use log::trace;
-
-        if !is_retryable_error(err) {
-            return false;
-        }
-
-        trace!("can retry {err:?}");
-
-        let body = match self.body {
-            Some(Some(ref body)) => Body::reusable(body.clone()),
-            Some(None) => {
-                log::debug!("error was retryable, but body not reusable");
-                return false;
-            }
-            None => Body::empty(),
-        };
-
-        if self.retry_count >= 2 {
-            trace!("retry count too high");
-            return false;
-        }
-        self.retry_count += 1;
-
-        // If it parsed once, it should parse again
-        let uri = try_uri(&self.url).expect("URL was already validated as URI");
-
-        *self.as_mut().in_flight().get_mut() = match *self.as_mut().in_flight().as_ref() {
-            #[cfg(feature = "http3")]
-            ResponseFuture::H3(_) => {
-                let mut req = hyper::Request::builder()
-                    .method(self.method.clone())
-                    .uri(uri)
-                    .body(body)
-                    .expect("valid request parts");
-                *req.headers_mut() = self.headers.clone();
-                let mut h3 = self
-                    .client
-                    .h3_client
-                    .as_ref()
-                    .expect("H3 client must exists, otherwise we can't have a h3 request here")
-                    .clone();
-                ResponseFuture::H3(h3.call(req))
-            }
-            _ => {
-                let mut req = hyper::Request::builder()
-                    .method(self.method.clone())
-                    .uri(uri)
-                    .body(body)
-                    .expect("valid request parts");
-                *req.headers_mut() = self.headers.clone();
-                let mut hyper = self.client.hyper.clone();
-                ResponseFuture::Default(hyper.call(req))
-            }
-        };
-
-        true
-    }
-}
-
-#[cfg(any(feature = "http2", feature = "http3"))]
-fn is_retryable_error(err: &(dyn std::error::Error + 'static)) -> bool {
-    // pop the legacy::Error
-    let err = if let Some(err) = err.source() {
-        err
-    } else {
-        return false;
-    };
-
-    #[cfg(feature = "http3")]
-    if let Some(cause) = err.source() {
-        if let Some(err) = cause.downcast_ref::<h3::error::ConnectionError>() {
-            log::debug!("determining if HTTP/3 error {err} can be retried");
-            // TODO: Does h3 provide an API for checking the error?
-            return err.to_string().as_str() == "timeout";
-        }
-    }
-
-    #[cfg(feature = "http2")]
-    if let Some(cause) = err.source() {
-        if let Some(err) = cause.downcast_ref::<h2::Error>() {
-            // They sent us a graceful shutdown, try with a new connection!
-            if err.is_go_away() && err.is_remote() && err.reason() == Some(h2::Reason::NO_ERROR) {
-                return true;
-            }
-
-            // REFUSED_STREAM was sent from the server, which is safe to retry.
-            // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.7-3.2
-            if err.is_reset() && err.is_remote() && err.reason() == Some(h2::Reason::REFUSED_STREAM)
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 impl Pending {
     pub(super) fn new_err(err: crate::Error) -> Pending {
-        Pending {
-            inner: PendingInner::Error(Some(err)),
-        }
+        Pending { inner: PendingInner::Error(Some(err)) }
     }
 
-    fn inner(self: Pin<&mut Self>) -> Pin<&mut PendingInner> {
-        self.project().inner
-    }
+    fn inner(self: Pin<&mut Self>) -> Pin<&mut PendingInner> { self.project().inner }
 }
 
 impl Future for Pending {
@@ -3018,9 +2848,9 @@ impl Future for Pending {
         let inner = self.inner();
         match inner.get_mut() {
             PendingInner::Request(ref mut req) => Pin::new(req).poll(cx),
-            PendingInner::Error(ref mut err) => Poll::Ready(Err(err
-                .take()
-                .expect("Pending error polled more than once"))),
+            PendingInner::Error(ref mut err) => {
+                Poll::Ready(Err(err.take().expect("Pending error polled more than once")))
+            }
         }
     }
 }
@@ -3045,68 +2875,37 @@ impl Future for PendingRequest {
             }
         }
 
-        loop {
-            let res = match self.as_mut().in_flight().get_mut() {
-                ResponseFuture::Default(r) => match Pin::new(r).poll(cx) {
-                    Poll::Ready(Err(e)) => {
-                        #[cfg(feature = "http2")]
-                        if e.is_request() {
-                            if let Some(e) = e.source() {
-                                if self.as_mut().retry_error(e) {
-                                    continue;
-                                }
-                            }
-                        }
-
-                        return Poll::Ready(Err(e.if_no_url(|| self.url.clone())));
-                    }
-                    Poll::Ready(Ok(res)) => res.map(super::body::boxed),
-                    Poll::Pending => return Poll::Pending,
-                },
-                #[cfg(feature = "http3")]
-                ResponseFuture::H3(r) => match Pin::new(r).poll(cx) {
-                    Poll::Ready(Err(e)) => {
-                        if self.as_mut().retry_error(&e) {
-                            continue;
-                        }
-                        return Poll::Ready(Err(
-                            crate::error::request(e).with_url(self.url.clone())
-                        ));
-                    }
-                    Poll::Ready(Ok(res)) => res,
-                    Poll::Pending => return Poll::Pending,
-                },
-            };
-
-            #[cfg(feature = "cookies")]
-            {
-                if let Some(ref cookie_store) = self.client.cookie_store {
-                    let mut cookies =
-                        cookie::extract_response_cookie_headers(res.headers()).peekable();
-                    if cookies.peek().is_some() {
-                        cookie_store.set_cookies(&mut cookies, &self.url);
-                    }
+        let res = match self.as_mut().in_flight().get_mut() {
+            ResponseFuture::Default(r) => match ready!(Pin::new(r).poll(cx)) {
+                Err(e) => {
+                    return Poll::Ready(Err(e.if_no_url(|| self.url.clone())));
                 }
+                Ok(res) => res.map(super::body::boxed),
+            },
+            #[cfg(feature = "http3")]
+            ResponseFuture::H3(r) => match ready!(Pin::new(r).poll(cx)) {
+                Err(e) => {
+                    return Poll::Ready(Err(crate::error::request(e).with_url(self.url.clone())));
+                }
+                Ok(res) => res,
+            },
+        };
+
+        if let Some(url) = &res.extensions().get::<tower_http::follow_redirect::RequestUri>() {
+            self.url = match Url::parse(&url.0.to_string()) {
+                Ok(url) => url,
+                Err(e) => return Poll::Ready(Err(crate::error::decode(e))),
             }
-            if let Some(url) = &res
-                .extensions()
-                .get::<tower_http::follow_redirect::RequestUri>()
-            {
-                self.url = match Url::parse(&url.0.to_string()) {
-                    Ok(url) => url,
-                    Err(e) => return Poll::Ready(Err(crate::error::decode(e))),
-                }
-            };
+        };
 
-            let res = Response::new(
-                res,
-                self.url.clone(),
-                self.client.accepts,
-                self.total_timeout.take(),
-                self.read_timeout,
-            );
-            return Poll::Ready(Ok(res));
-        }
+        let res = Response::new(
+            res,
+            self.url.clone(),
+            self.client.accepts,
+            self.total_timeout.take(),
+            self.read_timeout,
+        );
+        Poll::Ready(Ok(res))
     }
 }
 

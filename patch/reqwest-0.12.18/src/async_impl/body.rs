@@ -1,7 +1,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -107,13 +107,9 @@ impl Body {
         use http_body_util::StreamBody;
 
         let body = http_body_util::BodyExt::boxed(StreamBody::new(sync_wrapper::SyncStream::new(
-            stream
-                .map_ok(|d| Frame::data(Bytes::from(d)))
-                .map_err(Into::into),
+            stream.map_ok(|d| Frame::data(Bytes::from(d))).map_err(Into::into),
         )));
-        Body {
-            inner: Inner::Streaming(body),
-        }
+        Body { inner: Inner::Streaming(body) }
     }
 
     pub(crate) fn empty() -> Body {
@@ -121,9 +117,7 @@ impl Body {
     }
 
     pub(crate) fn reusable(chunk: Bytes) -> Body {
-        Body {
-            inner: Inner::Reusable(chunk),
-        }
+        Body { inner: Inner::Reusable(chunk) }
     }
 
     /// Wrap a [`HttpBody`] in a box inside `Body`.
@@ -149,18 +143,7 @@ impl Body {
 
         let boxed = IntoBytesBody { inner }.map_err(Into::into).boxed();
 
-        Body {
-            inner: Inner::Streaming(boxed),
-        }
-    }
-
-    pub(crate) fn try_reuse(self) -> (Option<Bytes>, Self) {
-        let reuse = match self.inner {
-            Inner::Reusable(ref chunk) => Some(chunk.clone()),
-            Inner::Streaming { .. } => None,
-        };
-
-        (reuse, self)
+        Body { inner: Inner::Streaming(boxed) }
     }
 
     pub(crate) fn try_clone(&self) -> Option<Body> {
@@ -296,18 +279,11 @@ impl HttpBody for Body {
 // ===== impl TotalTimeoutBody =====
 
 pub(crate) fn total_timeout<B>(body: B, timeout: Pin<Box<Sleep>>) -> TotalTimeoutBody<B> {
-    TotalTimeoutBody {
-        inner: body,
-        timeout,
-    }
+    TotalTimeoutBody { inner: body, timeout }
 }
 
 pub(crate) fn with_read_timeout<B>(body: B, timeout: Duration) -> ReadTimeoutBody<B> {
-    ReadTimeoutBody {
-        inner: body,
-        sleep: None,
-        timeout,
-    }
+    ReadTimeoutBody { inner: body, sleep: None, timeout }
 }
 
 impl<B> hyper::body::Body for TotalTimeoutBody<B>

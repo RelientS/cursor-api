@@ -9,7 +9,7 @@ use crate::common::utils::hex::HEX_CHARS;
 
 static mut SAFE_HASH: bool = false;
 
-pub(super) fn init_hash() {
+pub(super) fn init() {
     unsafe { SAFE_HASH = crate::common::utils::parse_from_env("SAFE_HASH", true) }
 }
 

@@ -1,20 +1,24 @@
 mod cache;
 mod provider;
-use core::fmt;
-use std::{io, str::FromStr};
-
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-pub(super) use cache::__init;
-pub use cache::{Token, TokenKey};
-pub use provider::{Provider, parse_providers};
 
 use crate::{
     app::constant::HEADER_B64,
     common::{
-        model::token::{StringI64, TokenPayload},
-        utils::{byte_to_hex, hex_to_byte},
+        model::{stringify::Stringify, token::TokenPayload},
+        utils::{hex::HEX_CHARS, hex_to_byte},
     },
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+pub(super) use cache::__init;
+pub use cache::{Token, TokenKey};
+use core::fmt;
+pub use provider::{Provider, parse_providers};
+use std::{io, str::FromStr};
+
+mod randomness {
+    /// 字节在格式化字符串中的起始位置（格式：XXXXXXXX-XXXX-XXXX）
+    pub(super) static BYTE_OFFSETS: [usize; 8] = [0, 2, 4, 6, 9, 11, 14, 16];
+}
 
 #[derive(Debug)]
 pub enum RandomnessError {
@@ -59,39 +63,31 @@ impl Randomness {
     pub fn to_str<'buf>(&self, buf: &'buf mut [u8; 18]) -> &'buf mut str {
         let bytes: [u8; 8] = self.0.to_ne_bytes();
 
-        byte_to_hex(bytes[0], unsafe { &mut *(buf.as_mut_ptr() as *mut _) });
-        byte_to_hex(bytes[1], unsafe {
-            &mut *(buf.as_mut_ptr().add(2) as *mut _)
-        });
-        byte_to_hex(bytes[2], unsafe {
-            &mut *(buf.as_mut_ptr().add(4) as *mut _)
-        });
-        byte_to_hex(bytes[3], unsafe {
-            &mut *(buf.as_mut_ptr().add(6) as *mut _)
-        });
+        for (&byte, pos) in bytes.iter().zip(randomness::BYTE_OFFSETS) {
+            buf[pos] = HEX_CHARS[(byte >> 4) as usize];
+            buf[pos + 1] = HEX_CHARS[(byte & 0x0F) as usize];
+        }
+
+        // 插入分隔符
         buf[8] = b'-';
-        byte_to_hex(bytes[4], unsafe {
-            &mut *(buf.as_mut_ptr().add(9) as *mut _)
-        });
-        byte_to_hex(bytes[5], unsafe {
-            &mut *(buf.as_mut_ptr().add(11) as *mut _)
-        });
         buf[13] = b'-';
-        byte_to_hex(bytes[6], unsafe {
-            &mut *(buf.as_mut_ptr().add(14) as *mut _)
-        });
-        byte_to_hex(bytes[7], unsafe {
-            &mut *(buf.as_mut_ptr().add(16) as *mut _)
-        });
 
         // SAFETY: buf 只包含有效的 ASCII 字符
-        unsafe { ::core::str::from_utf8_unchecked_mut(buf) }
+        unsafe { core::str::from_utf8_unchecked_mut(buf) }
     }
 }
 
 impl const Default for Randomness {
     #[inline(always)]
     fn default() -> Self { Self(0) }
+}
+
+impl core::fmt::Debug for Randomness {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut buf = [0u8; 18];
+        let s = self.to_str(&mut buf);
+        f.debug_tuple("Randomness").field(&s).finish()
+    }
 }
 
 impl fmt::Display for Randomness {
@@ -114,16 +110,13 @@ impl FromStr for Randomness {
         if bytes[8] != b'-' || bytes[13] != b'-' {
             return Err(RandomnessError::InvalidFormat);
         }
+
         let mut result = [0u8; 8];
 
-        result[0] = hex_to_byte(bytes[0], bytes[1]).ok_or(RandomnessError::InvalidFormat)?;
-        result[1] = hex_to_byte(bytes[2], bytes[3]).ok_or(RandomnessError::InvalidFormat)?;
-        result[2] = hex_to_byte(bytes[4], bytes[5]).ok_or(RandomnessError::InvalidFormat)?;
-        result[3] = hex_to_byte(bytes[6], bytes[7]).ok_or(RandomnessError::InvalidFormat)?;
-        result[4] = hex_to_byte(bytes[9], bytes[10]).ok_or(RandomnessError::InvalidFormat)?;
-        result[5] = hex_to_byte(bytes[11], bytes[12]).ok_or(RandomnessError::InvalidFormat)?;
-        result[6] = hex_to_byte(bytes[14], bytes[15]).ok_or(RandomnessError::InvalidFormat)?;
-        result[7] = hex_to_byte(bytes[16], bytes[17]).ok_or(RandomnessError::InvalidFormat)?;
+        for (result_byte, pos) in result.iter_mut().zip(randomness::BYTE_OFFSETS) {
+            *result_byte =
+                hex_to_byte(bytes[pos], bytes[pos + 1]).ok_or(RandomnessError::InvalidFormat)?;
+        }
 
         Ok(Self(u64::from_ne_bytes(result)))
     }
@@ -132,31 +125,25 @@ impl FromStr for Randomness {
 impl ::serde::Serialize for Randomness {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
+    where S: ::serde::Serializer {
         serializer.serialize_str(self.to_str(&mut [0u8; 18]))
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for Randomness {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         struct RandomnessVisitor;
 
         impl ::serde::de::Visitor<'_> for RandomnessVisitor {
             type Value = Randomness;
 
-            fn expecting(&self, formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                 formatter.write_str("a string in the format XXXXXXXX-XXXX-XXXX")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: ::serde::de::Error,
-            {
+            where E: ::serde::de::Error {
                 value.parse().map_err(E::custom)
             }
         }
@@ -165,8 +152,8 @@ impl<'de> ::serde::Deserialize<'de> for Randomness {
     }
 }
 
-const _: [u8; 8] = [0; ::core::mem::size_of::<Randomness>()];
-const _: () = assert!(::core::mem::align_of::<Randomness>() == 8);
+const _: [u8; 8] = [0; core::mem::size_of::<Randomness>()];
+const _: () = assert!(core::mem::align_of::<Randomness>() == 8);
 
 #[derive(Clone, Copy, PartialEq, Hash)]
 pub struct Subject {
@@ -177,10 +164,7 @@ pub struct Subject {
 impl Subject {
     #[inline]
     fn to_helper(self) -> SubjectHelper {
-        SubjectHelper {
-            provider: self.provider.to_helper(),
-            id: self.id.to_bytes(),
-        }
+        SubjectHelper { provider: self.provider.to_helper(), id: self.id.to_bytes() }
     }
 
     #[inline]
@@ -240,19 +224,15 @@ impl std::error::Error for SubjectError {}
 impl ::serde::Serialize for Subject {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
+    where S: ::serde::Serializer {
+        serializer.collect_str(self)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for Subject {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
         Self::from_str(&s).map_err(::serde::de::Error::custom)
     }
@@ -266,13 +246,18 @@ impl<'de> ::serde::Deserialize<'de> for Subject {
 ///
 /// ULID时间戳特性确保新格式高32位非零，实现无歧义格式识别。
 ///
+/// # 内部表示
+///
+/// 使用 `(u64, u64)` 降低对齐要求到8字节，字段顺序根据平台字节序自动调整，
+/// 确保与 `u128` 的内存布局完全一致。
+///
 /// # Examples
 ///
 /// ```
-/// use your_crate::UserId;
+/// use crate::app::model::UserId;
 ///
 /// // 新格式
-/// let id = UserId::new(ulid::Ulid::new().0);
+/// let id = UserId::from_u128(ulid::Ulid::new().0);
 /// assert_eq!(id.to_string().len(), 31);
 ///
 /// // 旧格式
@@ -284,87 +269,119 @@ impl<'de> ::serde::Deserialize<'de> for Subject {
     Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize,
 )]
 #[rkyv(derive(PartialEq, Eq, Hash))]
-#[repr(transparent)]
-pub struct UserId(u128);
+#[repr(C)]
+pub struct UserId(u64, u64);
 
 impl UserId {
     const PREFIX: &'static str = "user_";
 
-    #[inline]
-    pub const fn new(id: u128) -> Self { Self(id) }
+    // ==================== 抽象层：字节序处理 ====================
 
-    #[inline]
-    pub const fn from_u128(value: u128) -> Self { Self(value) }
-
-    #[inline]
-    pub const fn as_u128(self) -> u128 { self.0 }
-
-    #[inline]
-    pub const fn from_bytes(bytes: [u8; 16]) -> Self { Self(u128::from_ne_bytes(bytes)) }
-
-    #[inline]
-    pub const fn to_bytes(self) -> [u8; 16] { self.0.to_ne_bytes() }
-
-    /// 检查是否为旧格式ID
-    #[inline]
-    pub const fn is_legacy(&self) -> bool {
-        // Memory layout (little-endian): [低32位][次低32位][次高32位][最高32位]
-        //                     index:         [0]      [1]       [2]       [3]
-        // Memory layout (big-endian):    [最高32位][次高32位][次低32位][低32位]
-        //                     index:         [0]       [1]       [2]      [3]
-        let parts = unsafe { ::core::mem::transmute::<u128, [u32; 4]>(self.0) };
-
+    /// 获取数值的低64位（bits 0..64）
+    #[inline(always)]
+    const fn low(&self) -> u64 {
         #[cfg(target_endian = "little")]
-        const HIGH_INDEX: usize = 3;
-        #[cfg(target_endian = "big")]
-        const HIGH_INDEX: usize = 0;
+        return self.0;
 
-        parts[HIGH_INDEX] == 0
+        #[cfg(target_endian = "big")]
+        return self.1;
     }
+
+    /// 获取数值的高64位（bits 64..128）
+    #[inline(always)]
+    const fn high(&self) -> u64 {
+        #[cfg(target_endian = "little")]
+        return self.1;
+
+        #[cfg(target_endian = "big")]
+        return self.0;
+    }
+
+    /// 从语义化的 low/high 构造（内部使用）
+    #[inline(always)]
+    const fn from_parts(low: u64, high: u64) -> Self {
+        #[cfg(target_endian = "little")]
+        return Self(low, high);
+
+        #[cfg(target_endian = "big")]
+        return Self(high, low);
+    }
+
+    // ==================== 公开API：构造与转换 ====================
+
+    /// 从 u128 构造
+    #[inline]
+    pub const fn from_u128(value: u128) -> Self {
+        Self::from_parts(value as u64, (value >> 64) as u64)
+    }
+
+    /// 转换为 u128
+    #[inline]
+    pub const fn as_u128(self) -> u128 { (self.high() as u128) << 64 | self.low() as u128 }
+
+    /// 从字节数组构造
+    #[inline]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self { unsafe { core::mem::transmute(bytes) } }
+
+    /// 转换为字节数组
+    #[inline]
+    pub const fn to_bytes(self) -> [u8; 16] { unsafe { core::mem::transmute(self) } }
+
+    // ==================== 格式检测与字符串转换 ====================
+
+    /// 检查是否为旧格式ID（高32位为0）
+    #[inline]
+    pub const fn is_legacy(&self) -> bool { self.high() >> 32 == 0 }
 
     /// 高性能字符串转换，旧格式24字符，新格式31字符
     #[allow(clippy::wrong_self_convention)]
     #[inline]
     pub fn to_str<'buf>(&self, buf: &'buf mut [u8; 31]) -> &'buf mut str {
         if self.is_legacy() {
+            // 旧格式：24字符 hex，从 bytes[4..16] 编码
             let bytes = self.to_bytes();
             for (i, &byte) in bytes[4..].iter().enumerate() {
-                buf[i * 2] = crate::common::utils::hex::HEX_CHARS[(byte >> 4) as usize];
-                buf[i * 2 + 1] = crate::common::utils::hex::HEX_CHARS[(byte & 0x0f) as usize];
+                buf[i * 2] = HEX_CHARS[(byte >> 4) as usize];
+                buf[i * 2 + 1] = HEX_CHARS[(byte & 0x0f) as usize];
             }
 
-            // SAFETY: HEX_CHARS确保有效ASCII输出
-            unsafe {
-                ::core::str::from_utf8_unchecked_mut(&mut *(buf.as_mut_ptr() as *mut [u8; 24]))
-            }
+            // SAFETY: HEX_CHARS 确保输出是有效 ASCII
+            unsafe { core::str::from_utf8_unchecked_mut(&mut buf[..24]) }
         } else {
+            // 新格式：user_ + 26字符 ULID
             unsafe {
-                ::core::ptr::copy_nonoverlapping(Self::PREFIX.as_ptr(), buf.as_mut_ptr(), 5);
-                ulid::Ulid(self.0).array_to_str(&mut *(buf.as_mut_ptr().add(5) as *mut [u8; 26]));
-                ::core::str::from_utf8_unchecked_mut(buf)
+                core::ptr::copy_nonoverlapping(Self::PREFIX.as_ptr(), buf.as_mut_ptr(), 5);
+                ulid::Ulid(self.as_u128())
+                    .array_to_str(&mut *(buf.as_mut_ptr().add(5) as *mut [u8; 26]));
+                core::str::from_utf8_unchecked_mut(buf)
             }
         }
     }
 }
 
-impl ::core::fmt::Display for UserId {
-    #[inline]
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+impl core::fmt::Debug for UserId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut buf = [0u8; 31];
+        let s = self.to_str(&mut buf);
+        f.debug_tuple("UserId").field(&s).finish()
+    }
+}
+
+impl core::fmt::Display for UserId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.to_str(&mut [0; 31]))
     }
 }
 
-impl ::core::str::FromStr for UserId {
+impl core::str::FromStr for UserId {
     type Err = SubjectError;
 
-    fn from_str(s: &str) -> ::core::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
         match s.len() {
             31 => {
-                let id_str = s
-                    .strip_prefix(Self::PREFIX)
-                    .ok_or(SubjectError::InvalidFormat)?;
+                let id_str = s.strip_prefix(Self::PREFIX).ok_or(SubjectError::InvalidFormat)?;
                 let id = ulid::Ulid::from_string(id_str).map_err(|_| SubjectError::InvalidUlid)?;
-                Ok(Self(id.0))
+                Ok(Self::from_u128(id.0))
             }
             24 => {
                 let hex_array: &[u8; 24] = unsafe { s.as_bytes().try_into().unwrap_unchecked() };
@@ -372,8 +389,7 @@ impl ::core::str::FromStr for UserId {
                 let mut result = [0u8; 16];
 
                 for (dst, &[hi, lo]) in result[4..].iter_mut().zip(hex_pairs) {
-                    *dst = crate::common::utils::hex::hex_to_byte(hi, lo)
-                        .ok_or(SubjectError::InvalidHex)?;
+                    *dst = hex_to_byte(hi, lo).ok_or(SubjectError::InvalidHex)?;
                 }
 
                 Ok(Self::from_bytes(result))
@@ -385,27 +401,23 @@ impl ::core::str::FromStr for UserId {
 
 impl ::serde::Serialize for UserId {
     #[inline]
-    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
+    fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
+    where S: ::serde::Serializer {
         serializer.serialize_str(self.to_str(&mut [0; 31]))
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for UserId {
     #[inline]
-    fn deserialize<D>(deserializer: D) -> ::core::result::Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(::serde::de::Error::custom)
     }
 }
 
-const _: [u8; 16] = [0; ::core::mem::size_of::<UserId>()];
-const _: () = assert!(::core::mem::align_of::<UserId>() == 16);
+const _: [u8; 16] = [0; core::mem::size_of::<UserId>()];
+const _: () = assert!(core::mem::align_of::<UserId>() == 8);
 
 #[derive(Clone, Copy, PartialEq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize)]
 pub struct Duration {
@@ -457,7 +469,7 @@ impl fmt::Display for TokenError {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Hash)]
+#[derive(Clone, Copy, Hash)]
 pub struct RawToken {
     /// 用户标识符
     pub subject: Subject,
@@ -471,18 +483,17 @@ pub struct RawToken {
     pub is_session: bool,
 }
 
-// impl PartialEq for RawToken {
-//     fn eq(&self, other: &Self) -> bool {
-//         self.id.id == other.id.id && self.randomness == other.randomness
-//     }
-// }
+impl PartialEq for RawToken {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool { self.signature == other.signature }
+}
 
 impl RawToken {
     #[inline(always)]
     fn to_token_payload(self) -> TokenPayload {
         TokenPayload {
             sub: self.subject,
-            time: StringI64(self.duration.start),
+            time: Stringify(self.duration.start),
             exp: self.duration.end,
             randomness: self.randomness,
             is_session: self.is_session,
@@ -502,10 +513,7 @@ impl RawToken {
 
     #[inline(always)]
     pub const fn key(&self) -> TokenKey {
-        TokenKey {
-            user_id: self.subject.id,
-            randomness: self.randomness,
-        }
+        TokenKey { user_id: self.subject.id, randomness: self.randomness }
     }
 
     #[inline(always)]
@@ -513,6 +521,20 @@ impl RawToken {
 
     #[inline(always)]
     pub const fn is_session(&self) -> bool { self.is_session }
+}
+
+impl fmt::Debug for RawToken {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawToken")
+            .field("p", &self.subject.provider.0)
+            .field("i", &self.subject.id.as_u128())
+            .field("r", &core::ops::Range { start: self.duration.start, end: self.duration.end })
+            .field("n", &self.randomness.0)
+            .field("w", &self.is_web())
+            .field("s", &self.signature)
+            .finish()
+    }
 }
 
 impl fmt::Display for RawToken {
@@ -532,17 +554,13 @@ impl FromStr for RawToken {
 
     fn from_str(token: &str) -> Result<Self, Self::Err> {
         // 1. 分割并验证token格式
-        let parts = token
-            .strip_prefix(HEADER_B64)
-            .ok_or(TokenError::InvalidHeader)?;
+        let parts = token.strip_prefix(HEADER_B64).ok_or(TokenError::InvalidHeader)?;
 
         let (payload_b64, signature_b64) =
             parts.split_once('.').ok_or(TokenError::InvalidFormat)?;
 
         // 2. 解码payload和signature
-        let payload = URL_SAFE_NO_PAD
-            .decode(payload_b64)
-            .map_err(TokenError::InvalidBase64)?;
+        let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(TokenError::InvalidBase64)?;
 
         let signature = URL_SAFE_NO_PAD
             .decode(signature_b64)
@@ -565,10 +583,7 @@ impl FromStr for RawToken {
         // 4. 构造RawToken
         Ok(Self {
             subject: payload.sub,
-            duration: Duration {
-                start: payload.time.0,
-                end: payload.exp,
-            },
+            duration: Duration { start: payload.time.0, end: payload.exp },
             randomness: payload.randomness,
             is_session: payload.is_session,
             signature,
@@ -579,9 +594,7 @@ impl FromStr for RawToken {
 impl<'de> ::serde::Deserialize<'de> for RawToken {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(::serde::de::Error::custom)
     }
@@ -618,10 +631,7 @@ pub struct SubjectHelper {
 impl SubjectHelper {
     #[inline]
     fn try_extract(self) -> Result<Subject, SubjectError> {
-        Ok(Subject {
-            provider: self.provider.try_extract()?,
-            id: UserId::from_bytes(self.id),
-        })
+        Ok(Subject { provider: self.provider.try_extract()?, id: UserId::from_bytes(self.id) })
     }
 }
 

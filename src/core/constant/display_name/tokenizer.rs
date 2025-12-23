@@ -17,10 +17,7 @@ pub struct TokenMeta {
 pub fn tokenize(identifier: &'static str) -> Vec<Token> {
     identifier
         .split('-')
-        .map(|segment| Token {
-            content: segment,
-            meta: analyze_segment(segment),
-        })
+        .map(|segment| Token { content: segment, meta: analyze_segment(segment) })
         .collect()
 }
 
@@ -52,11 +49,5 @@ fn analyze_segment(segment: &str) -> TokenMeta {
         }
     }
 
-    TokenMeta {
-        is_digit_only: is_digit_only && !has_dot,
-        digit_count,
-        has_dot,
-        first_char,
-        len,
-    }
+    TokenMeta { is_digit_only: is_digit_only && !has_dot, digit_count, has_dot, first_char, len }
 }

@@ -1,80 +1,44 @@
-#![allow(unsafe_op_in_unsafe_fn, dead_code)]
+//! 十六进制编解码工具
 
-//! 高性能十六进制编解码工具
-
-// ASCII 十六进制解码表
-pub const HEX_DECODE_TABLE: [u8; 256] = {
-    let mut table = [0xFF; 256];
-    let mut i = 0;
-    while i < 10 {
-        table[b'0' as usize + i] = i as u8;
+/// 解码查找表：将ASCII字符映射到0-15或0xFF（非法）
+pub(crate) const HEX_TABLE: &[u8; 256] = &{
+    let mut buf = [0xFF; 256]; // 默认非法值
+    let mut i: u8 = 0;
+    loop {
+        buf[i as usize] = match i {
+            b'0'..=b'9' => i - b'0',
+            b'a'..=b'f' => i - b'a' + 10,
+            b'A'..=b'F' => i - b'A' + 10,
+            _ => 0xFF,
+        };
+        if i == 255 {
+            break buf;
+        }
         i += 1;
     }
-    let mut i = 0;
-    while i < 6 {
-        table[b'a' as usize + i] = 10 + i as u8;
-        table[b'A' as usize + i] = 10 + i as u8;
-        i += 1;
-    }
-    table
 };
 
-/// 十六进制字符表
-pub const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+/// 编码字符表
+pub static HEX_CHARS: [u8; 16] = *b"0123456789abcdef";
 
-/// 将单个字节编码为两个十六进制字符（小写）
-#[inline(always)]
-pub fn byte_to_hex(byte: u8, out: &mut [u8; 2]) {
-    out[0] = unsafe { *HEX_CHARS.get_unchecked((byte >> 4) as usize) };
-    out[1] = unsafe { *HEX_CHARS.get_unchecked((byte & 0x0f) as usize) };
-}
+// /// 将单个字节编码为两个十六进制字符（小写）
+// #[inline(always)]
+// pub fn byte_to_hex(byte: u8, out: &mut [u8; 2]) {
+//     // 编译器会优化掉边界检查（索引范围可证明为 0-15）
+//     out[0] = HEX_CHARS[(byte >> 4) as usize];
+//     out[1] = HEX_CHARS[(byte & 0x0F) as usize];
+// }
 
-/// 解码两个十六进制字符为一个字节（带边界检查）
+/// 解码两个十六进制字符为一个字节
 #[inline(always)]
 pub const fn hex_to_byte(hi: u8, lo: u8) -> Option<u8> {
-    let high = HEX_DECODE_TABLE[hi as usize];
+    let high = HEX_TABLE[hi as usize];
     if high == 0xFF {
         return None;
     }
-    let low = HEX_DECODE_TABLE[lo as usize];
+    let low = HEX_TABLE[lo as usize];
     if low == 0xFF {
         return None;
     }
-    Some((high << 4) | low)
+    Some((high << 4) | low) // 直接位移，无需查表
 }
-
-// /// 解码两个十六进制字符为一个字节（无边界检查）
-// ///
-// /// # Safety
-// /// 调用者必须保证 hi 和 lo 都是有效的十六进制字符
-// #[inline(always)]
-// pub const unsafe fn hex_to_byte_unchecked(hi: u8, lo: u8) -> u8 {
-//     debug_assert!(hi < 128 && lo < 128);
-//     let high = *HEX_DECODE_TABLE.get_unchecked(hi as usize);
-//     let low = *HEX_DECODE_TABLE.get_unchecked(lo as usize);
-//     debug_assert!(high != 0xFF && low != 0xFF);
-//     (high << 4) | low
-// }
-
-// /// 编码字节数组为十六进制字符串
-// #[inline]
-// pub fn encode_hex(src: &[u8], dst: &mut [u8]) {
-//     debug_assert!(dst.len() >= src.len() * 2);
-//     for (i, &byte) in src.iter().enumerate() {
-//         byte_to_hex(byte, &mut dst[i * 2..i * 2 + 2]);
-//     }
-// }
-
-// /// 解码十六进制字符串为字节数组
-// #[inline]
-// pub fn decode_hex(src: &[u8], dst: &mut [u8]) -> Option<()> {
-//     if src.len() % 2 != 0 || dst.len() < src.len() / 2 {
-//         return None;
-//     }
-
-//     for i in 0..src.len() / 2 {
-//         dst[i] = hex_to_byte(src[i * 2], src[i * 2 + 1])?;
-//     }
-
-//     Some(())
-// }

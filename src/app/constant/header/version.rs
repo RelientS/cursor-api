@@ -1,9 +1,9 @@
 //! Cursor 版本信息管理模块
 //!
-//! 本模块使用 MaybeUninit 来存储版本信息，这种设计考虑了以下因素：
+//! 本模块使用 ManuallyInit 来存储版本信息，这种设计考虑了以下因素：
 //! 1. 版本信息在程序生命周期内只需初始化一次
-//! 2. 避免使用 lazy_static 或 once_cell 等额外依赖
-//! 3. 性能考虑：避免每次访问时的同步开销
+//! 2. 零开销访问：没有原子操作或运行时检查
+//! 3. 符合单线程初始化、多线程只读的模式
 //!
 //! # Safety
 //!
@@ -11,10 +11,8 @@
 //! - 初始化函数 `initialize_cursor_version` 必须在程序启动时的单线程环境中调用
 //! - 必须且只能调用一次 `initialize_cursor_version`
 //! - 初始化后，所有访问都是只读的（通过 clone() 返回副本）
-//! - 虽然 `bytes::Bytes` 本身是线程安全的（使用原子操作的引用计数），
-//!   但由于 Rust 2024 edition 的限制，我们仍需要 `#[allow(static_mut_refs)]`
 
-use ::core::mem::MaybeUninit;
+use manually_init::ManuallyInit;
 
 // 定义所有常量
 crate::define_typed_constants! {
@@ -57,24 +55,26 @@ crate::define_typed_constants! {
 }
 
 /// 客户端版本的 HeaderValue
-static mut CLIENT_VERSION: MaybeUninit<http::header::HeaderValue> = MaybeUninit::uninit();
+static CLIENT_VERSION: ManuallyInit<http::header::HeaderValue> = ManuallyInit::new();
 
 /// Cursor User-Agent 的 HeaderValue
-static mut HEADER_VALUE_UA_CURSOR_LATEST: MaybeUninit<http::header::HeaderValue> =
-    MaybeUninit::uninit();
+static HEADER_VALUE_UA_CURSOR_LATEST: ManuallyInit<http::header::HeaderValue> = ManuallyInit::new();
 
 /// 获取 Cursor 客户端版本的 HeaderValue
 ///
 /// # Safety
 ///
 /// 调用者必须确保 `initialize_cursor_version` 已经被调用。
-/// `#[allow(static_mut_refs)]` 是必需的，因为 `HeaderValue` 内部使用 `bytes::Bytes`。
-/// 尽管 `Bytes` 的 clone 操作是线程安全的（使用原子引用计数），
-/// 但 Rust 的借用检查器无法验证这一点。
-#[allow(static_mut_refs)]
 #[inline(always)]
 pub fn cursor_client_version() -> http::header::HeaderValue {
-    unsafe { CLIENT_VERSION.assume_init_ref().clone() }
+    CLIENT_VERSION.get().clone()
+}
+
+#[inline(always)]
+pub fn cursor_version() -> bytes::Bytes {
+    use crate::common::model::HeaderValue;
+    #[allow(clippy::missing_transmute_annotations)]
+    unsafe { core::mem::transmute::<_, &HeaderValue>(CLIENT_VERSION.get()) }.inner.clone()
 }
 
 /// 获取 Cursor 用户代理的 HeaderValue
@@ -82,13 +82,9 @@ pub fn cursor_client_version() -> http::header::HeaderValue {
 /// # Safety
 ///
 /// 调用者必须确保 `initialize_cursor_version` 已经被调用。
-/// `#[allow(static_mut_refs)]` 是必需的，因为 `HeaderValue` 内部使用 `bytes::Bytes`。
-/// 尽管 `Bytes` 的 clone 操作是线程安全的（使用原子引用计数），
-/// 但 Rust 的借用检查器无法验证这一点。
-#[allow(static_mut_refs)]
 #[inline(always)]
 pub fn header_value_ua_cursor_latest() -> http::header::HeaderValue {
-    unsafe { HEADER_VALUE_UA_CURSOR_LATEST.assume_init_ref().clone() }
+    HEADER_VALUE_UA_CURSOR_LATEST.get().clone()
 }
 
 /// 初始化 Cursor 的版本信息
@@ -102,10 +98,8 @@ pub fn header_value_ua_cursor_latest() -> http::header::HeaderValue {
 pub fn initialize_cursor_version() {
     use ::core::ops::Deref as _;
 
-    let version = crate::common::utils::parse_from_env(
-        ENV_CURSOR_CLIENT_VERSION,
-        DEFAULT_CLIENT_VERSION,
-    );
+    let version =
+        crate::common::utils::parse_from_env(ENV_CURSOR_CLIENT_VERSION, DEFAULT_CLIENT_VERSION);
 
     // 验证版本格式
     validate_version_string(&version);
@@ -153,11 +147,8 @@ pub fn initialize_cursor_version() {
         }
     };
 
-    #[allow(static_mut_refs)]
-    unsafe {
-        CLIENT_VERSION.write(version_header);
-        HEADER_VALUE_UA_CURSOR_LATEST.write(ua_header);
-    }
+    CLIENT_VERSION.init(version_header);
+    HEADER_VALUE_UA_CURSOR_LATEST.init(ua_header);
 }
 
 /// 检查版本字符串是否符合 VSCode/Cursor 的版本格式
@@ -221,9 +212,9 @@ pub fn validate_version_string(version: &str) {
         let warning = StringBuilder::with_capacity(STRING_BUILDER_CAPACITY)
             .append("Warning: Invalid version format '")
             .append(version)
-            .append("'. Expected format: major.minor.patch (e.g., 1.0.0)")
+            .append("'. Expected format: major.minor.patch (e.g., 1.0.0)\n")
             .build();
-        __eprintln!(&warning);
+        __eprint!(&warning);
     }
 }
 

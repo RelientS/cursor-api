@@ -1,8 +1,6 @@
 use super::Models;
-use crate::{
-    app::model::{AppConfig, UsageCheck},
-    core::constant::{FREE_MODELS, get_static_id},
-};
+use crate::app::model::{AppConfig, UsageCheck};
+use crate::core::constant::{FREE_MODELS, get_static_id};
 
 static mut BYPASS_MODEL_VALIDATION: bool = false;
 
@@ -29,9 +27,7 @@ impl ExtModel {
     #[inline]
     pub fn from_str(s: &str) -> Option<Self> {
         // 处理 online 后缀
-        let (base_str, web) = s
-            .strip_suffix("-online")
-            .map_or((s, false), |base| (base, true));
+        let (base_str, web) = s.strip_suffix("-online").map_or((s, false), |base| (base, true));
 
         // 先尝试直接匹配（可能带有 -max 后缀）
         if let Some(raw) = Models::find_id(base_str) {
@@ -45,9 +41,8 @@ impl ExtModel {
         }
 
         // 处理 max 后缀
-        let (model_str, max) = base_str
-            .strip_suffix("-max")
-            .map_or((base_str, false), |base| (base, true));
+        let (model_str, max) =
+            base_str.strip_suffix("-max").map_or((base_str, false), |base| (base, true));
 
         // 如果有 -max 后缀，尝试匹配不带后缀的模型名
         if max
@@ -69,6 +64,7 @@ impl ExtModel {
             return Some(Self {
                 id,
                 is_image: true,
+                // 这里的检测是孱弱的，尽管如此，影响可能不大
                 is_thinking: id.contains("-thinking")
                     || {
                         let bytes = id.as_bytes();
@@ -92,5 +88,10 @@ impl ExtModel {
             UsageCheck::All => true,
             UsageCheck::Custom(models) => models.contains(&self.id),
         }
+    }
+
+    #[inline(always)]
+    pub const fn id(&self) -> ::prost::ByteStr {
+        ::prost::ByteStr::from_static(self.id)
     }
 }

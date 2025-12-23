@@ -1,22 +1,24 @@
-#![allow(clippy::enum_variant_names, dead_code)]
+use core::num::NonZeroU16;
+
+use crate::common::utils::r#true;
 
 // Include the generated Protobuf code
 // include!(concat!(env!("OUT_DIR"), "/aiserver.v1.rs"));
 include!("v1/aiserver.v1.rs");
 
 impl ErrorDetails {
-    /// Converts an error to an appropriate HTTP status code.
+    /// 将错误转换为相应的 HTTP 状态码。
     ///
-    /// This method maps internal error types to standard HTTP status codes based on
-    /// the nature of the error, following RESTful API best practices.
+    /// 此方法根据错误的性质，将内部错误类型映射到标准的 HTTP 状态码，
+    /// 遵循 RESTful API 最佳实践。
     ///
-    /// Returns:
-    ///   - u16: The HTTP status code corresponding to the error.
-    pub fn status_code(error: i32) -> u16 {
+    /// 返回值：
+    ///   - u16: 与错误对应的 HTTP 状态码。
+    pub fn status_code(error: i32) -> NonZeroU16 {
         use error_details::Error;
-        match Error::try_from(error) {
+        let code = match Error::try_from(error) {
             Ok(error) => match error {
-                // 400 - Bad Request: Client errors that are malformed or invalid
+                // 400 - Bad Request: 客户端错误，请求格式错误或无效
                 Error::BadRequest
                 | Error::BadModelName
                 | Error::SlashEditFileTooLong
@@ -24,7 +26,7 @@ impl ErrorDetails {
                 | Error::ClaudeImageTooLarge
                 | Error::ConversationTooLong => 400,
 
-                // 401 - Unauthorized: Authentication related errors
+                // 401 - Unauthorized: 身份验证相关错误
                 Error::BadApiKey
                 | Error::BadUserApiKey
                 | Error::InvalidAuthId
@@ -33,19 +35,20 @@ impl ErrorDetails {
                 | Error::Unauthorized
                 | Error::GithubNoUserCredentials => 401,
 
-                // 402 - Payment Required
+                // 402 - Payment Required: 需要付费
                 Error::UsagePricingRequired | Error::UsagePricingRequiredChangeable => 402,
 
-                // 403 - Forbidden: Permission related errors
+                // 403 - Forbidden: 权限相关错误
                 Error::NotLoggedIn
                 | Error::NotHighEnoughPermissions
                 | Error::AgentRequiresLogin
                 | Error::ProUserOnly
                 | Error::TaskNoPermissions
                 | Error::GithubUserNoAccess
-                | Error::GithubAppNoAccess => 403,
+                | Error::GithubAppNoAccess
+                | Error::HooksBlocked => 403,
 
-                // 404 - Not Found: Resource not found errors
+                // 404 - Not Found: 资源未找到错误
                 Error::NotFound
                 | Error::UserNotFound
                 | Error::TaskUuidNotFound
@@ -53,16 +56,16 @@ impl ErrorDetails {
                 | Error::GitgraphNotFound
                 | Error::FileNotFound => 404,
 
-                // 409 - Conflict: Resource state conflicts
+                // 409 - Conflict: 资源状态冲突
                 Error::GithubMultipleOwners => 409,
 
-                // 410 - Gone: Resource no longer available
+                // 410 - Gone: 资源不再可用
                 Error::Deprecated | Error::OutdatedClient => 410,
 
-                // 422 - Unprocessable Entity: Valid request but unable to process
+                // 422 - Unprocessable Entity: 请求有效但无法处理
                 Error::ApiKeyNotSupported => 422,
 
-                // 429 - Too Many Requests: Rate limiting related errors
+                // 429 - Too Many Requests: 限流相关错误
                 Error::FreeUserRateLimitExceeded
                 | Error::ProUserRateLimitExceeded
                 | Error::OpenaiRateLimitExceeded
@@ -73,37 +76,39 @@ impl ErrorDetails {
                 | Error::RateLimited
                 | Error::RateLimitedChangeable => 429,
 
-                // 499 - Client Closed Request (non-standard but commonly used)
+                // 499 - Client Closed Request: 客户端关闭请求（非标准但常用）
                 Error::UserAbortedRequest => 499,
 
-                // 503 - Service Unavailable: Server temporarily unavailable due to overload/maintenance
+                // 503 - Service Unavailable: 服务器因过载或维护暂时不可用
                 Error::FreeUserUsageLimit
                 | Error::ProUserUsageLimit
                 | Error::ResourceExhausted
                 | Error::MaxTokens => 503,
 
-                // 504 - Gateway Timeout
+                // 504 - Gateway Timeout: 网关超时
                 Error::Timeout => 504,
 
-                // 533 - Upstream Failure (non-standard): The upstream service reported a failure
+                // 533 - Upstream Failure: 上游服务报告失败（非标准）
                 Error::Unspecified
                 | Error::Openai
                 | Error::CustomMessage
                 | Error::Debounced
-                | Error::RepositoryServiceRepositoryIsNotInitialized => 533,
+                | Error::RepositoryServiceRepositoryIsNotInitialized
+                | Error::Custom => 533,
             },
-            // Errors not defined in the upstream enum are treated as true internal server errors
+            // 未在上游枚举中定义的错误被视为真正的内部服务器错误
             Err(_) => 500,
-        }
+        };
+        unsafe { NonZeroU16::new_unchecked(code) }
     }
 
-    /// Returns the snake_case string representation of the error type.
+    /// 返回错误类型的 snake_case 字符串表示。
     ///
-    /// This method maps error variants to their snake_case string names,
-    /// useful for logging, debugging, or API responses.
+    /// 此方法将错误变体映射到其 snake_case 字符串名称，
+    /// 用于日志记录、调试或 API 响应。
     ///
-    /// Returns:
-    ///   - &'static str: The snake_case name of the error type.
+    /// 返回值：
+    ///   - &'static str: 错误类型的 snake_case 名称。
     pub fn r#type(error: i32) -> &'static str {
         use error_details::Error;
         match Error::try_from(error) {
@@ -149,8 +154,9 @@ impl ErrorDetails {
                 Error::ApiKeyRateLimit => "api_key_rate_limit",
                 Error::Debounced => "debounced",
                 Error::BadRequest => "bad_request",
-                Error::RepositoryServiceRepositoryIsNotInitialized =>
-                    "repository_service_repository_is_not_initialized",
+                Error::RepositoryServiceRepositoryIsNotInitialized => {
+                    "repository_service_repository_is_not_initialized"
+                }
                 Error::Unauthorized => "unauthorized",
                 Error::ConversationTooLong => "conversation_too_long",
                 Error::UsagePricingRequired => "usage_pricing_required",
@@ -161,8 +167,10 @@ impl ErrorDetails {
                 Error::GithubMultipleOwners => "github_multiple_owners",
                 Error::RateLimited => "rate_limited",
                 Error::RateLimitedChangeable => "rate_limited_changeable",
+                Error::Custom => "custom",
+                Error::HooksBlocked => "hooks_blocked",
             },
-            Err(_) => crate::app::constant::UNKNOWN, // Default for unknown error types
+            Err(_) => crate::app::constant::UNKNOWN, // 未知错误类型的默认值
         }
     }
 }
@@ -180,5 +188,28 @@ impl CustomErrorDetails {
         add_string(&mut self.detail, rhs.detail);
         // self.buttons.extend(rhs.buttons);
         self.additional_info.extend(rhs.additional_info);
+    }
+}
+
+impl From<conversation_message::Thinking> for super::super::stream::decoder::Thinking {
+    #[inline]
+    fn from(thinking: conversation_message::Thinking) -> Self {
+        if !thinking.text.is_empty() {
+            Self::Text(thinking.text)
+        } else if !thinking.signature.is_empty() {
+            Self::Signature(thinking.signature)
+        } else if !thinking.redacted_thinking.is_empty() {
+            Self::RedactedThinking(thinking.redacted_thinking)
+        } else {
+            Self::Text(thinking.text)
+        }
+    }
+}
+
+impl TryFrom<image::DynamicImage> for image_proto::Dimension {
+    type Error = core::num::TryFromIntError;
+    #[inline]
+    fn try_from(img: image::DynamicImage) -> Result<Self, Self::Error> {
+        Ok(Self { width: img.width().try_into()?, height: img.height().try_into()? })
     }
 }

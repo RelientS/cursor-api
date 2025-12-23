@@ -292,11 +292,11 @@ impl Response {
     /// # }
     /// ```
     pub async fn bytes(self) -> crate::Result<Bytes> {
-        use http_body_util::BodyExt;
+        use http_body_util::{BodyExt as _, Collected};
 
-        BodyExt::collect(self.res.into_body())
+        self.res.into_body().collect()
             .await
-            .map(|buf| buf.to_bytes())
+            .map(Collected::to_bytes)
     }
 
     /// Stream a chunk of the response body.
@@ -422,6 +422,16 @@ impl Response {
         } else {
             Ok(self)
         }
+    }
+
+    #[allow(missing_docs)]
+    pub async fn into_bytes_parts(self) -> crate::Result<(http::response::Parts, Bytes)> {
+        use http_body_util::BodyExt as _;
+
+        let (parts, body) = self.res.into_parts();
+        body.collect()
+            .await
+            .map(|buf| (parts, buf.to_bytes()))
     }
 
     // private

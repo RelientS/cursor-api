@@ -1,6 +1,3 @@
-use hyper_util::client::legacy::connect::dns::Name as HyperName;
-use tower_service::Service;
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -8,6 +5,9 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+use hyper_util::client::legacy::connect::dns::Name as HyperName;
+use tower_service::Service;
 
 use crate::error::BoxError;
 
@@ -37,6 +37,14 @@ pub trait Resolve: Send + Sync {
 #[derive(Debug)]
 pub struct Name(pub(super) HyperName);
 
+/// A more general trait implemented for types implementing `Resolve`.
+///
+/// Unnameable, only exported to aid seeing what implements this.
+pub trait IntoResolve {
+    #[doc(hidden)]
+    fn into_resolve(self) -> Arc<dyn Resolve>;
+}
+
 impl Name {
     /// View the name as a string.
     pub fn as_str(&self) -> &str {
@@ -48,9 +56,7 @@ impl FromStr for Name {
     type Err = sealed::InvalidNameError;
 
     fn from_str(host: &str) -> Result<Self, Self::Err> {
-        HyperName::from_str(host)
-            .map(Name)
-            .map_err(|_| sealed::InvalidNameError { _ext: () })
+        HyperName::from_str(host).map(Name).map_err(|_| sealed::InvalidNameError { _ext: () })
     }
 }
 
@@ -79,13 +85,11 @@ impl DynResolver {
         target: &http::Uri,
     ) -> Result<impl Iterator<Item = std::net::SocketAddr>, BoxError> {
         let host = target.host().ok_or("missing host")?;
-        let port = target
-            .port_u16()
-            .unwrap_or_else(|| match target.scheme_str() {
-                Some("https") => 443,
-                Some("socks4") | Some("socks4a") | Some("socks5") | Some("socks5h") => 1080,
-                _ => 80,
-            });
+        let port = target.port_u16().unwrap_or_else(|| match target.scheme_str() {
+            Some("https") => 443,
+            Some("socks4") | Some("socks4a") | Some("socks5") | Some("socks5h") => 1080,
+            _ => 80,
+        });
 
         let explicit_port = target.port().is_some();
 
@@ -124,10 +128,7 @@ impl DnsResolverWithOverrides {
         dns_resolver: Arc<dyn Resolve>,
         overrides: HashMap<String, Vec<SocketAddr>>,
     ) -> Self {
-        DnsResolverWithOverrides {
-            dns_resolver,
-            overrides: Arc::new(overrides),
-        }
+        DnsResolverWithOverrides { dns_resolver, overrides: Arc::new(overrides) }
     }
 }
 
@@ -140,6 +141,30 @@ impl Resolve for DnsResolverWithOverrides {
             }
             None => self.dns_resolver.resolve(name),
         }
+    }
+}
+
+impl IntoResolve for Arc<dyn Resolve> {
+    fn into_resolve(self) -> Arc<dyn Resolve> {
+        self
+    }
+}
+
+impl<R> IntoResolve for Arc<R>
+where
+    R: Resolve + 'static,
+{
+    fn into_resolve(self) -> Arc<dyn Resolve> {
+        self
+    }
+}
+
+impl<R> IntoResolve for R
+where
+    R: Resolve + 'static,
+{
+    fn into_resolve(self) -> Arc<dyn Resolve> {
+        Arc::new(self)
     }
 }
 

@@ -1,15 +1,15 @@
-use ahash::HashMap;
-use memmap2::{MmapMut, MmapOptions};
-use rkyv::{
-    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, rancor::Error as RkyvError,
-};
-use std::collections::VecDeque;
-use tokio::fs::OpenOptions;
-
 use crate::app::{
     lazy::LOGS_FILE_PATH,
     model::{ExtToken, ExtTokenHelper, RequestLog, TokenKey, log::RequestLogHelper},
 };
+use alloc::collections::VecDeque;
+use memmap2::{MmapMut, MmapOptions};
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize, rancor::Error as RkyvError,
+};
+use tokio::fs::OpenOptions;
+
+type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
 
 /// 请求日志限制枚举
 #[derive(Debug, Clone, Copy)]
@@ -69,7 +69,11 @@ impl LogManager {
     #[inline]
     pub fn new(logs_limit: RequestLogsLimit) -> Self {
         Self {
-            logs: VecDeque::new(),
+            logs: match logs_limit {
+                RequestLogsLimit::Disabled => VecDeque::new(),
+                RequestLogsLimit::Limited(limit) if limit < 128 => VecDeque::with_capacity(limit),
+                _ => VecDeque::with_capacity(32),
+            },
             tokens: HashMap::default(),
             token_ref_counts: HashMap::default(),
             logs_limit,
@@ -78,10 +82,10 @@ impl LogManager {
 
     /// 从存储中加载日志
     #[inline(never)]
-    pub async fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn load() -> Result<Self, Box<dyn core::error::Error + Send + Sync + 'static>> {
         let logs_limit = RequestLogsLimit::from_usize(crate::common::utils::parse_from_env(
             "REQUEST_LOGS_LIMIT",
-            100,
+            100usize,
         ));
 
         // 如果禁用日志，则返回空管理器
@@ -89,52 +93,35 @@ impl LogManager {
             return Ok(Self::new(logs_limit));
         }
 
-        let (logs, tokens) = Self::load_data_from_file().await?;
-        let mut manager = Self {
-            logs,
-            tokens,
-            token_ref_counts: HashMap::default(),
-            logs_limit,
+        let (logs, tokens) = {
+            let file = match OpenOptions::new().read(true).open(&*LOGS_FILE_PATH).await {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Self::new(logs_limit));
+                }
+                Err(e) => return Err(Box::new(e)),
+            };
+
+            if file.metadata().await?.len() > usize::MAX as u64 {
+                return Err("日志文件过大".into());
+            }
+
+            let mmap = unsafe { MmapOptions::new().map(&file)? };
+            let helper =
+                unsafe { ::rkyv::from_bytes_unchecked::<LogManagerHelper, RkyvError>(&mmap) }?;
+
+            let logs = helper.logs.into_iter().map(RequestLogHelper::into_request_log).collect();
+
+            let tokens = helper.tokens.into_iter().map(|(k, v)| (k, v.extract())).collect();
+
+            (logs, tokens)
         };
+        let mut manager = Self { logs, tokens, token_ref_counts: HashMap::default(), logs_limit };
 
         // 重建token引用计数
         manager.rebuild_token_ref_counts();
 
         Ok(manager)
-    }
-
-    /// 从文件加载数据
-    #[inline(never)]
-    async fn load_data_from_file()
-    -> Result<(VecDeque<RequestLog>, HashMap<TokenKey, ExtToken>), Box<dyn std::error::Error>> {
-        let file = match OpenOptions::new().read(true).open(&*LOGS_FILE_PATH).await {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((VecDeque::new(), HashMap::default()));
-            }
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        if file.metadata().await?.len() > usize::MAX as u64 {
-            return Err("日志文件过大".into());
-        }
-
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-        let helper = unsafe { ::rkyv::from_bytes_unchecked::<LogManagerHelper, RkyvError>(&mmap) }?;
-
-        let logs = helper
-            .logs
-            .into_iter()
-            .map(RequestLogHelper::into_request_log)
-            .collect();
-
-        let tokens = helper
-            .tokens
-            .into_iter()
-            .map(|(k, v)| (k, v.extract()))
-            .collect();
-
-        Ok((logs, tokens))
     }
 
     /// 重建token引用计数
@@ -149,8 +136,7 @@ impl LogManager {
         }
 
         // 移除没有被引用的tokens
-        self.tokens
-            .retain(|key, _| self.token_ref_counts.contains_key(key));
+        self.tokens.retain(|key, _| self.token_ref_counts.contains_key(key));
     }
 
     /// 增加token引用计数
@@ -173,21 +159,7 @@ impl LogManager {
 
     /// 内部方法：添加或更新token（仅在需要时调用）
     #[inline]
-    fn insert_token(&mut self, key: TokenKey, mut token: ExtToken) {
-        use std::collections::hash_map::Entry;
-
-        match self.tokens.entry(key) {
-            Entry::Occupied(mut entry) => {
-                // 保留旧token的user，更新其他字段
-                ::core::mem::swap(&mut token.user, &mut entry.get_mut().user);
-                entry.insert(token);
-            }
-            Entry::Vacant(entry) => {
-                // 直接插入新token
-                entry.insert(token);
-            }
-        }
-    }
+    fn insert_token(&mut self, key: TokenKey, token: ExtToken) { self.tokens.insert(key, token); }
 
     /// 公开方法：添加日志时同时更新相关token
     #[inline(never)]
@@ -223,7 +195,7 @@ impl LogManager {
 
     /// 保存数据到文件
     #[inline(never)]
-    pub async fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn save(&self) -> Result<(), Box<dyn core::error::Error + Send + Sync + 'static>> {
         // 如果禁用日志，则跳过保存
         if !self.logs_limit.should_log() {
             return Ok(());
@@ -231,14 +203,10 @@ impl LogManager {
 
         let helper = LogManagerHelper {
             logs: self.logs.iter().map(RequestLogHelper::from).collect(),
-            tokens: self
-                .tokens
-                .iter()
-                .map(|(k, v)| (*k, ExtTokenHelper::new(v)))
-                .collect(),
+            tokens: self.tokens.iter().map(|(k, v)| (*k, ExtTokenHelper::new(v))).collect(),
         };
 
-        let bytes = ::rkyv::to_bytes::<RkyvError>(&helper)?;
+        let bytes = rkyv::to_bytes::<RkyvError>(&helper)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -291,11 +259,9 @@ impl LogManager {
     /// 查找指定ID的日志并修改
     #[inline]
     pub fn update_log<F>(&mut self, id: u64, f: F)
-    where
-        F: FnOnce(&mut RequestLog),
-    {
+    where F: FnOnce(&mut RequestLog) {
         if let Some(log) = self.logs.iter_mut().rev().find(|log| log.id == id) {
-            f(log);
+            f(log)
         }
     }
 
@@ -364,35 +330,17 @@ impl LogManager {
     //     self.rebuild_token_ref_counts();
     // }
 
-    /// 根据ID查找日志及其对应的token
+    /// 根据ID查找日志
     #[inline]
-    pub fn find_log_with_token(&self, id: u64) -> Option<(&RequestLog, &ExtToken)> {
-        self.logs
-            .iter()
-            .rev()
-            .find(|log| log.id == id)
-            .and_then(|log| {
-                self.get_token(&log.token_info.key)
-                    .map(|token| (log, token))
-            })
+    pub fn find_log(&self, id: u64) -> Option<&RequestLog> {
+        self.logs.iter().rev().find(|log| log.id == id)
     }
 
-    /// 根据ID查找可变日志及其对应的token
-    #[inline]
-    pub fn find_log_with_token_mut(&mut self, id: u64) -> Option<(&mut RequestLog, &mut ExtToken)> {
-        // 先获取token引用，避免借用冲突
-        let token_key = self
-            .logs
-            .iter()
-            .rev()
-            .find(|log| log.id == id)
-            .map(|log| log.token_info.key)?;
-
-        let token = self.tokens.get_mut(&token_key)?;
-        let log = self.logs.iter_mut().rev().find(|log| log.id == id)?;
-
-        Some((log, token))
-    }
+    // /// 根据ID查找可变日志
+    // #[inline]
+    // pub fn find_log_mut(&mut self, id: u64) -> Option<&mut RequestLog> {
+    //     self.logs.iter_mut().rev().find(|log| log.id == id)
+    // }
 
     // /// 遍历日志和对应token的迭代器
     // #[inline]

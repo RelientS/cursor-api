@@ -2,7 +2,8 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use http::{header::HeaderValue, HeaderMap, Uri};
+use http::{HeaderMap, Uri};
+use http::header::HeaderValue;
 use hyper_util::client::proxy::matcher;
 
 use crate::into_url::{IntoUrl, IntoUrlSealed};
@@ -123,7 +124,15 @@ pub trait IntoProxy {
 impl<S: IntoUrl> IntoProxy for S {
     fn into_proxy(self) -> crate::Result<Url> {
         match self.as_str().into_url() {
-            Ok(ok) => Ok(ok),
+            Ok(mut url) => {
+                // If the scheme is a SOCKS protocol and no port is specified, set the default
+                if url.port().is_none()
+                    && matches!(url.scheme(), "socks4" | "socks4a" | "socks5" | "socks5h")
+                {
+                    let _ = url.set_port(Some(1080));
+                }
+                Ok(url)
+            }
             Err(e) => {
                 let mut presumed_to_have_scheme = true;
                 let mut source = e.source();
@@ -254,14 +263,7 @@ impl Proxy {
     }
 
     fn new(intercept: Intercept) -> Proxy {
-        Proxy {
-            extra: Extra {
-                auth: None,
-                misc: None,
-            },
-            intercept,
-            no_proxy: None,
-        }
+        Proxy { extra: Extra { auth: None, misc: None }, intercept, no_proxy: None }
     }
 
     /// Set the `Proxy-Authorization` header using Basic auth.
@@ -355,11 +357,7 @@ impl Proxy {
     }
 
     pub(crate) fn into_matcher(self) -> Matcher {
-        let Proxy {
-            intercept,
-            extra,
-            no_proxy,
-        } = self;
+        let Proxy { intercept, extra, no_proxy } = self;
 
         let maybe_has_http_auth;
         let maybe_has_http_custom_headers;
@@ -406,12 +404,7 @@ impl Proxy {
             }
         };
 
-        Matcher {
-            inner,
-            extra,
-            maybe_has_http_auth,
-            maybe_has_http_custom_headers,
-        }
+        Matcher { inner, extra, maybe_has_http_auth, maybe_has_http_custom_headers }
     }
 
     /*
@@ -453,10 +446,7 @@ fn cache_maybe_has_http_custom_headers(url: &Url, extra: &Option<HeaderMap>) -> 
 
 impl fmt::Debug for Proxy {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("Proxy")
-            .field(&self.intercept)
-            .field(&self.no_proxy)
-            .finish()
+        f.debug_tuple("Proxy").field(&self.intercept).field(&self.no_proxy).finish()
     }
 }
 
@@ -464,9 +454,7 @@ impl NoProxy {
     /// Returns a new no-proxy configuration based on environment variables (or `None` if no variables are set)
     /// see [self::NoProxy::from_string()] for the string format
     pub fn from_env() -> Option<NoProxy> {
-        let raw = std::env::var("NO_PROXY")
-            .or_else(|_| std::env::var("no_proxy"))
-            .ok()?;
+        let raw = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).ok()?;
 
         // Per the docs, this returns `None` if no environment variable is set. We can only reach
         // here if an env var is set, so we return `Some(NoProxy::default)` if `from_string`
@@ -495,9 +483,7 @@ impl NoProxy {
     /// The URL `http://notgoogle.com/` would not match.
     pub fn from_string(no_proxy_list: &str) -> Option<Self> {
         // lazy parsed, to not make the type public in hyper-util
-        Some(NoProxy {
-            inner: no_proxy_list.into(),
-        })
+        Some(NoProxy { inner: no_proxy_list.into() })
     }
 }
 
@@ -505,10 +491,7 @@ impl Matcher {
     pub(crate) fn system() -> Self {
         Self {
             inner: Matcher_::Util(matcher::Matcher::from_system()),
-            extra: Extra {
-                auth: None,
-                misc: None,
-            },
+            extra: Extra { auth: None, misc: None },
             // maybe env vars have auth!
             maybe_has_http_auth: true,
             maybe_has_http_custom_headers: true,
@@ -521,10 +504,7 @@ impl Matcher {
             Matcher_::Custom(ref c) => c.call(dst),
         };
 
-        inner.map(|inner| Intercepted {
-            inner,
-            extra: self.extra.clone(),
-        })
+        inner.map(|inner| Intercepted { inner, extra: self.extra.clone() })
     }
 
     /// Return whether this matcher might provide HTTP (not s) auth.
@@ -775,15 +755,11 @@ impl Custom {
         .parse()
         .expect("should be valid Url");
 
-        (self.func)(&url)
-            .and_then(|result| result.ok())
-            .and_then(|target| {
-                let m = matcher::Matcher::builder()
-                    .all(String::from(target))
-                    .build();
+        (self.func)(&url).and_then(|result| result.ok()).and_then(|target| {
+            let m = matcher::Matcher::builder().all(String::from(target)).build();
 
-                m.intercept(uri)
-            })
+            m.intercept(uri)
+        })
         //.map(|scheme| scheme.if_no_auth(&self.auth))
     }
 }
@@ -900,14 +876,29 @@ mod tests {
 
     #[test]
     fn test_maybe_has_http_auth() {
-        let m = Proxy::all("https://letme:in@yo.local")
-            .unwrap()
-            .into_matcher();
+        let m = Proxy::all("https://letme:in@yo.local").unwrap().into_matcher();
         assert!(!m.maybe_has_http_auth(), "https always tunnels");
 
-        let m = Proxy::all("http://letme:in@yo.local")
-            .unwrap()
-            .into_matcher();
+        let m = Proxy::all("http://letme:in@yo.local").unwrap().into_matcher();
         assert!(m.maybe_has_http_auth(), "http forwards");
+    }
+
+    #[test]
+    fn test_socks_proxy_default_port() {
+        {
+            let m = Proxy::all("socks5://example.com").unwrap().into_matcher();
+
+            let http = "http://hyper.rs";
+            let https = "https://hyper.rs";
+
+            assert_eq!(intercepted_uri(&m, http).port_u16(), Some(1080));
+            assert_eq!(intercepted_uri(&m, https).port_u16(), Some(1080));
+
+            // custom port
+            let m = Proxy::all("socks5://example.com:1234").unwrap().into_matcher();
+
+            assert_eq!(intercepted_uri(&m, http).port_u16(), Some(1234));
+            assert_eq!(intercepted_uri(&m, https).port_u16(), Some(1234));
+        }
     }
 }

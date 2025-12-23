@@ -1,12 +1,11 @@
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::model::{FetchMode, PageContent, UsageCheck, VisionAbility};
+use crate::app::model::{FetchMode, UsageCheck, VisionAbility};
 
 #[derive(Serialize)]
 pub struct ConfigData {
-    pub content: Option<PageContent>,
     pub vision_ability: VisionAbility,
     pub enable_slow_pool: bool,
     pub enable_long_context: bool,
@@ -22,8 +21,6 @@ pub struct ConfigData {
 #[serde(default)]
 pub struct ConfigUpdateRequest {
     pub action: String, // "get", "update", "reset"
-    pub path: String,
-    pub content: Option<PageContent>,
     pub vision_ability: Option<VisionAbility>,
     pub enable_slow_pool: Option<bool>,
     pub enable_long_context: Option<bool>,

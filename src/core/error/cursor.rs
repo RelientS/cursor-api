@@ -3,7 +3,7 @@
 use super::CanonicalError;
 use crate::core::aiserver;
 
-#[derive(::serde::Deserialize)]
+#[derive(Debug, ::serde::Deserialize)]
 pub struct CursorError {
     error: Error,
 }
@@ -44,21 +44,17 @@ impl Detail {
     fn decode_base64_error_details<'de, D>(
         deserializer: D,
     ) -> Result<aiserver::v1::ErrorDetails, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
         use prost::Message as _;
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         match STANDARD_NO_PAD.decode(s) {
             Ok(buf) => aiserver::v1::ErrorDetails::decode(&buf[..]).map_err(|e| {
-                ::serde::de::Error::custom(format_args!(
+                serde::de::Error::custom(format_args!(
                     "failed to decode from Base64-decoded bytes: {e}"
                 ))
             }),
-            Err(e) => Err(::serde::de::Error::custom(format_args!(
-                "invalid Base64 string: {e}"
-            ))),
+            Err(e) => Err(serde::de::Error::custom(format_args!("invalid Base64 string: {e}"))),
         }
     }
 }
@@ -73,8 +69,7 @@ impl CursorError {
             1 => unsafe {
                 let mut vec = self.error.details;
                 vec.set_len(0);
-                ::core::hint::assert_unchecked(vec.len() < vec.capacity());
-                ::core::ptr::read(vec.as_ptr())
+                core::ptr::read(vec.as_ptr())
             }
             .value
             .into(),
@@ -87,15 +82,14 @@ impl CursorError {
             n => {
                 eprintln!("收到少见错误数: {n}，请尝试联系开发者以获取支持");
                 crate::debug!("错误({n}): {:?}", self.error);
-                self.error
-                    .details
-                    .into_iter()
-                    .map(|detail| detail.value.into())
-                    .sum()
+                self.error.details.into_iter().map(|detail| detail.value.into()).sum()
             }
         };
         e.with_code(self.error.code)
     }
+
+    #[inline]
+    pub fn from_slice(v: &[u8]) -> Result<Self, serde_json::Error> { serde_json::from_slice(v) }
 }
 
 impl From<CursorError> for CanonicalError {

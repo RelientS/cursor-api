@@ -8,11 +8,11 @@ use std::str::FromStr;
 
 crate::def_pub_const!(
     /// Auth0认证提供者标识符
-    AUTH0 => "auth0",
+    AUTH0 = "auth0",
     /// Google OAuth2认证提供者标识符
-    GOOGLE_OAUTH2 => "google-oauth2",
+    GOOGLE_OAUTH2 = "google-oauth2",
     /// GitHub认证提供者标识符
-    GITHUB => "github",
+    GITHUB = "github",
 );
 
 /// 默认支持的认证提供者列表
@@ -23,9 +23,14 @@ static mut PROVIDERS: &'static [&'static str] = DEFAULT_PROVIDERS;
 ///
 /// 这是一个对静态字符串标识符的包装，
 /// 该标识符会与支持的提供者列表进行验证
-#[derive(Clone, Copy, PartialEq, Hash)]
+#[derive(Clone, Copy, Hash)]
 #[repr(transparent)]
 pub struct Provider(pub(super) &'static str);
+
+impl PartialEq for Provider {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool { self.0.as_ptr() == other.0.as_ptr() }
+}
 
 impl fmt::Display for Provider {
     #[inline]
@@ -63,9 +68,7 @@ impl FromStr for Provider {
 impl ::serde::Serialize for Provider {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
+    where S: ::serde::Serializer {
         serializer.serialize_str(self.0)
     }
 }
@@ -73,9 +76,7 @@ impl ::serde::Serialize for Provider {
 impl<'de> ::serde::Deserialize<'de> for Provider {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: ::serde::Deserializer<'de>,
-    {
+    where D: ::serde::Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
         Self::from_str(&s).map_err(serde::de::Error::custom)
     }

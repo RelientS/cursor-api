@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 use super::{constant::AUTHORIZATION_BEARER_PREFIX, lazy::AUTH_TOKEN, model::AppConfig};
 use crate::common::model::{
@@ -44,7 +44,7 @@ pub async fn handle_config_update(
             StatusCode::UNAUTHORIZED,
             Json(GenericError {
                 status: ApiStatus::Error,
-                code: Some(401),
+                code: Some(StatusCode::UNAUTHORIZED),
                 error: Some(Cow::Borrowed("未提供认证令牌")),
                 message: None,
             }),
@@ -55,7 +55,7 @@ pub async fn handle_config_update(
             StatusCode::UNAUTHORIZED,
             Json(GenericError {
                 status: ApiStatus::Error,
-                code: Some(401),
+                code: Some(StatusCode::UNAUTHORIZED),
                 error: Some(Cow::Borrowed("无效的认证令牌")),
                 message: None,
             }),
@@ -66,7 +66,7 @@ pub async fn handle_config_update(
         "get" => Ok(Json(ConfigResponse {
             status: ApiStatus::Success,
             data: Some(ConfigData {
-                content: AppConfig::get_page_content(&request.path),
+                // content: AppConfig::get_page_content(&request.path),
                 vision_ability: AppConfig::get_vision_ability(),
                 enable_slow_pool: AppConfig::get_slow_pool(),
                 enable_long_context: AppConfig::get_long_context(),
@@ -81,20 +81,20 @@ pub async fn handle_config_update(
 
         "update" => {
             // 处理页面内容更新
-            if !request.path.is_empty()
-                && let Some(content) = request.content
-                && AppConfig::update_page_content(&request.path, content)
-            {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(GenericError {
-                        status: ApiStatus::Error,
-                        code: Some(400),
-                        error: Some(Cow::Borrowed("更新页面内容失败: 无效的路径")),
-                        message: None,
-                    }),
-                ));
-            }
+            // if !request.path.is_empty()
+            //     && let Some(content) = request.content
+            //     && AppConfig::update_page_content(&request.path, content)
+            // {
+            //     return Err((
+            //         StatusCode::BAD_REQUEST,
+            //         Json(GenericError {
+            //             status: ApiStatus::Error,
+            //             code: unsafe { ::core::intrinsics::transmute(StatusCode::BAD_REQUEST) },
+            //             error: Some(Cow::Borrowed("更新页面内容失败: 无效的路径")),
+            //             message: None,
+            //         }),
+            //     ));
+            // }
 
             handle_updates!(request,
                 vision_ability => AppConfig::update_vision_ability,
@@ -116,17 +116,17 @@ pub async fn handle_config_update(
 
         "reset" => {
             // 重置页面内容
-            if !request.path.is_empty() && AppConfig::reset_page_content(&request.path) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(GenericError {
-                        status: ApiStatus::Error,
-                        code: Some(400),
-                        error: Some(Cow::Borrowed("重置页面内容失败: 无效的路径")),
-                        message: None,
-                    }),
-                ));
-            }
+            // if !request.path.is_empty() && AppConfig::reset_page_content(&request.path) {
+            //     return Err((
+            //         StatusCode::BAD_REQUEST,
+            //         Json(GenericError {
+            //             status: ApiStatus::Error,
+            //             code: unsafe { ::core::intrinsics::transmute(StatusCode::BAD_REQUEST) },
+            //             error: Some(Cow::Borrowed("重置页面内容失败: 无效的路径")),
+            //             message: None,
+            //         }),
+            //     ));
+            // }
 
             handle_resets!(request,
                 vision_ability => AppConfig::reset_vision_ability,
@@ -150,7 +150,7 @@ pub async fn handle_config_update(
             StatusCode::BAD_REQUEST,
             Json(GenericError {
                 status: ApiStatus::Error,
-                code: Some(400),
+                code: Some(StatusCode::BAD_REQUEST),
                 error: Some(Cow::Borrowed("无效的操作类型")),
                 message: None,
             }),

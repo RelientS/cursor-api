@@ -1,22 +1,24 @@
-use super::aiserver::v1::{ComposerExternalLink, WebReference};
+use super::aiserver::v1::{
+    ComposerExternalLink, ConversationMessage, ConversationMessageHeader, WebReference,
+    image_proto::Dimension,
+};
 
 pub mod anthropic;
 pub mod openai;
 
+mod error;
+pub use error::Error as AdapterError;
+
 crate::define_typed_constants! {
     &'static str => {
-        /// 图片功能禁用错误消息
-        ERR_VISION_DISABLED = "图片功能已禁用",
-        /// Base64 图片限制错误消息
-        ERR_BASE64_ONLY = "仅支持 base64 编码的图片",
+        /// 换行符
+        NEWLINE = "\n",
         /// Web 搜索模式
         WEB_SEARCH_MODE = "full_search",
         /// Ask 模式名称
         ASK_MODE_NAME = "Ask",
         /// Agent 模式名称
         AGENT_MODE_NAME = "Agent",
-        /// 换行符
-        NEWLINE = "\n",
     }
 }
 
@@ -82,7 +84,7 @@ fn parse_web_references(text: &str) -> Vec<WebReference> {
 
 // 解析消息中的外部链接
 #[inline]
-fn extract_external_links(text: &str, base_uuid: &mut u16) -> Vec<ComposerExternalLink> {
+fn extract_external_links(text: &str, base_uuid: &mut BaseUuid) -> Vec<ComposerExternalLink> {
     let mut external_links = Vec::new();
     let mut chars = text.chars().peekable();
 
@@ -98,13 +100,13 @@ fn extract_external_links(text: &str, base_uuid: &mut u16) -> Vec<ComposerExtern
 
             if !url.is_empty()
                 && let Ok(parsed_url) = url::Url::parse(&url)
-                && (parsed_url.scheme() == "http" || parsed_url.scheme() == "https")
+                && {
+                    let scheme = parsed_url.scheme().as_bytes();
+                    scheme == b"http" || scheme == b"https"
+                }
             {
-                external_links.push(ComposerExternalLink {
-                    url,
-                    uuid: base_uuid.to_string(),
-                });
-                *base_uuid = base_uuid.wrapping_add(1);
+                external_links
+                    .push(ComposerExternalLink { url, uuid: base_uuid.add_and_to_string() });
             }
         }
     }
@@ -114,7 +116,7 @@ fn extract_external_links(text: &str, base_uuid: &mut u16) -> Vec<ComposerExtern
 
 // 检测并分离 WebReferences
 #[inline]
-fn extract_web_references_info(text: &str) -> (String, Vec<WebReference>, bool) {
+fn extract_web_references_info(text: String) -> (String, Vec<WebReference>, bool) {
     if text.starts_with("WebReferences:") {
         if let Some((web_refs_text, content_text)) = text.split_once("\n\n") {
             let web_refs = parse_web_references(web_refs_text);
@@ -125,6 +127,27 @@ fn extract_web_references_info(text: &str) -> (String, Vec<WebReference>, bool) 
         }
     } else {
         (text.to_string(), vec![], false)
+    }
+}
+
+struct BaseUuid {
+    inner: u16,
+    buffer: itoa::Buffer,
+}
+
+impl BaseUuid {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            inner: rand::Rng::random_range(&mut rand::rng(), 256u16..384),
+            buffer: itoa::Buffer::new(),
+        }
+    }
+    #[inline]
+    fn add_and_to_string(&mut self) -> String {
+        let s = self.buffer.format(self.inner).to_string();
+        self.inner = self.inner.wrapping_add(1);
+        s
     }
 }
 
@@ -150,7 +173,71 @@ fn sanitize_tool_name(input: &str) -> String {
         }
     }
 
-    result.shrink_to_fit();
-
     result
+}
+
+// 处理 HTTP 图片 URL
+async fn process_http_image(
+    url: &str,
+    client: reqwest::Client,
+) -> Result<(bytes::Bytes, Option<Dimension>), AdapterError> {
+    let response = client.get(url).send().await.map_err(|_| AdapterError::RequestFailed)?;
+    let image_data = response.bytes().await.map_err(|_| AdapterError::ResponseReadFailed)?;
+
+    // 检查图片格式
+    let format = image::guess_format(&image_data);
+    match format {
+        Ok(image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP) => {
+            // 这些格式都支持
+        }
+        Ok(image::ImageFormat::Gif) => {
+            let mut options = gif::DecodeOptions::new();
+            options.skip_frame_decoding(true);
+            if let Ok(frames) = options.read_info(std::io::Cursor::new(image_data.as_ref()))
+                && frames.into_iter().nth(1).is_some()
+            {
+                return Err(AdapterError::UnsupportedAnimatedGif);
+            }
+        }
+        _ => return Err(AdapterError::UnsupportedImageFormat),
+    }
+    let format = __unwrap!(format);
+
+    // 获取图片尺寸
+    let dimensions = image::load_from_memory_with_format(&image_data, format)
+        .ok()
+        .and_then(|img| img.try_into().ok());
+
+    Ok((image_data, dimensions))
+}
+
+struct Messages {
+    inner: Vec<ConversationMessage>,
+    headers: Vec<ConversationMessageHeader>,
+}
+
+impl Messages {
+    #[inline]
+    fn with_capacity(capacity: usize) -> Self {
+        Self { inner: Vec::with_capacity(capacity), headers: Vec::with_capacity(capacity) }
+    }
+    #[inline]
+    fn push(&mut self, message: ConversationMessage) {
+        self.headers.push(ConversationMessageHeader {
+            bubble_id: message.bubble_id.clone(),
+            server_bubble_id: message.server_bubble_id.clone(),
+            r#type: message.r#type,
+        });
+        self.inner.push(message);
+    }
+    #[inline]
+    fn from_single(message: ConversationMessage) -> Self {
+        let mut v = Self::with_capacity(1);
+        v.push(message);
+        v
+    }
+    #[inline]
+    fn last(&self) -> Option<&ConversationMessage> { self.inner.last() }
+    #[inline]
+    fn last_mut(&mut self) -> Option<&mut ConversationMessage> { self.inner.last_mut() }
 }

@@ -11,10 +11,11 @@ use crate::parse;
 pub struct LoadResult {
     /// Number of successfully loaded variables
     pub loaded: usize,
-    /// Number of variables that were skipped (for `load` method only)
-    pub skipped: usize,
-    /// Number of variables that were overridden (for `load_override` method only)
-    pub overridden: usize,
+    // /// Number of variables that were skipped (for `load` method only)
+    // pub skipped: usize,
+    // /// Number of variables that were overridden (for `load_override` method only)
+    // pub overridden: usize,
+    pub skipped_or_overridden: usize,
 }
 
 pub struct Iter<R> {
@@ -57,8 +58,7 @@ impl<R: Read> Iter<R> {
 
         Ok(LoadResult {
             loaded,
-            skipped,
-            overridden: 0,
+            skipped_or_overridden: skipped,
         })
     }
 
@@ -86,8 +86,7 @@ impl<R: Read> Iter<R> {
 
         Ok(LoadResult {
             loaded,
-            skipped: 0,
-            overridden,
+            skipped_or_overridden: overridden,
         })
     }
 

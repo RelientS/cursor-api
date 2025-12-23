@@ -1,9 +1,11 @@
+use alloc::borrow::Cow;
+
 use super::tokenizer::Token;
-use std::borrow::Cow;
 
 #[derive(Debug)]
 pub enum Pattern {
     // 特殊处理
+    #[allow(clippy::upper_case_acronyms)]
     GPT,
     O(u8), // O1, O3, O4
 
@@ -45,12 +47,12 @@ pub fn parse_patterns(tokens: Vec<Token>) -> ParseResult {
             }
             b'o' if token.meta.len == 2 => {
                 // 可能是 o1, o3, o4
-                if let Some(digit) = token.content.bytes().nth(1) {
-                    if matches!(digit, b'1' | b'3' | b'4') {
-                        main_parts.push(Pattern::O(digit - b'0'));
-                        i += 1;
-                        continue;
-                    }
+                if let Some(&digit) = token.content.as_bytes().get(1)
+                    && matches!(digit, b'1' | b'3' | b'4')
+                {
+                    main_parts.push(Pattern::O(digit - b'0'));
+                    i += 1;
+                    continue;
                 }
             }
             b'v' | b'r' | b'k' if token.meta.len >= 2 => {
@@ -90,13 +92,13 @@ pub fn parse_patterns(tokens: Vec<Token>) -> ParseResult {
             }
 
             // 日期检测（4位或2位数字）
-            if token.meta.digit_count == 4 || token.meta.digit_count == 2 {
-                if let Some(date) = try_parse_date(&tokens, i) {
-                    date_parts.push(Pattern::Date(date));
-                    // 更新 i 的值根据日期长度
-                    i = update_index_for_date(&tokens, i);
-                    continue;
-                }
+            if (token.meta.digit_count == 4 || token.meta.digit_count == 2)
+                && let Some(date) = try_parse_date(&tokens, i)
+            {
+                date_parts.push(Pattern::Date(date));
+                // 更新 i 的值根据日期长度
+                i = update_index_for_date(&tokens, i);
+                continue;
             }
 
             // 其他数字作为普通词
@@ -117,10 +119,7 @@ pub fn parse_patterns(tokens: Vec<Token>) -> ParseResult {
         i += 1;
     }
 
-    ParseResult {
-        main_parts,
-        date_parts,
-    }
+    ParseResult { main_parts, date_parts }
 }
 
 #[inline(always)]
@@ -165,7 +164,7 @@ fn try_parse_date(tokens: &[Token], start: usize) -> Option<Cow<'static, str>> {
         let bytes = token.content.as_bytes();
         // 检查是否可能是月份（01-12）
         let month = (bytes[0] - b'0') * 10 + (bytes[1] - b'0');
-        if month >= 1 && month <= 12 {
+        if (1..=12).contains(&month) {
             // 预分配精确长度：2 + '-' + 2 = 5
             let mut date = String::with_capacity(5);
             date.push_str(&token.content[0..2]);

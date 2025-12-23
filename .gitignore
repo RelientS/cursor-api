@@ -32,3 +32,9 @@ Cargo.lock
 /*.tar.gz
 /src/core/model/a.rs
 .cargo/config.toml
+/front
+/pmacro
+/*.json
+/tests/data/stream_data.txt
+/frontend.zip
+/config.toml
