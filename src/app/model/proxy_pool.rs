@@ -1,4 +1,4 @@
-use crate::app::lazy::{PROXIES_FILE_PATH, SERVICE_TIMEOUT, TCP_KEEPALIVE};
+use crate::app::lazy::{PROXIES_FILE_PATH, SERVICE_TIMEOUT, TCP_KEEPALIVE, TCP_KEEPALIVE_INTERVAL, TCP_KEEPALIVE_RETRIES};
 use alloc::sync::Arc;
 use arc_swap::{ArcSwap, ArcSwapAny};
 use core::{str::FromStr, time::Duration};
@@ -236,8 +236,10 @@ impl SingleProxy {
     fn insert_to(&self, clients: &mut HashMap<SingleProxy, Client>) {
         let builder = Client::builder()
             .https_only(true)
-            .tcp_keepalive(Duration::from_secs(*TCP_KEEPALIVE))
-            .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT))
+            .tcp_keepalive(TCP_KEEPALIVE.to_duration())
+            .tcp_keepalive_interval(TCP_KEEPALIVE_INTERVAL.to_duration())
+            .tcp_keepalive_retries(TCP_KEEPALIVE_RETRIES.to_count())
+            .connect_timeout(Duration::from_secs(*SERVICE_TIMEOUT as _))
             .webpki_roots_only();
         let client = match self {
             SingleProxy::Non => builder.no_proxy().build().expect("创建无代理客户端失败"),

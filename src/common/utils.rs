@@ -30,7 +30,6 @@ pub mod ulid;
 use super::model::userinfo::{Session, StripeProfile, UsageProfile, UserProfile};
 use crate::{
     app::{
-        constant::EMPTY_STRING,
         lazy::{
             chat_models_url, filtered_usage_events_url, get_privacy_mode_url,
             is_on_new_pricing_url, server_config_url, token_poll_url, user_api_url,
@@ -61,47 +60,46 @@ use reqwest::Client;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait ParseFromEnv: Sized + 'static {
-    type Result: Sized + 'static = Self;
-    fn parse_from_env(key: &str, default: Self) -> Self::Result;
+    type Result: Sized + From<Self> + 'static = Self;
+    fn parse_from_env(key: &str) -> Option<Self::Result>;
+    #[inline]
+    fn parse_from_env_or(key: &str, default: Self) -> Self::Result {
+        Self::parse_from_env(key).unwrap_or(default.into())
+    }
 }
 
 impl ParseFromEnv for bool {
     #[inline]
-    fn parse_from_env(key: &str, default: bool) -> bool {
-        ::std::env::var(key)
-            .ok()
-            .map(|mut val| {
-                let trimmed = val.trim();
-                let start = trimmed.as_ptr() as usize - val.as_ptr() as usize;
-                let len = trimmed.len();
+    fn parse_from_env(key: &str) -> Option<bool> {
+        ::std::env::var(key).ok().and_then(|mut val| {
+            let trimmed = val.trim();
+            let start = trimmed.as_ptr() as usize - val.as_ptr() as usize;
+            let len = trimmed.len();
 
-                // 只对 trim 后的部分转小写
-                unsafe {
-                    val.as_bytes_mut().get_unchecked_mut(start..start + len).make_ascii_lowercase();
-                }
+            // 只对 trim 后的部分转小写
+            unsafe {
+                val.as_bytes_mut().get_unchecked_mut(start..start + len).make_ascii_lowercase();
+            }
 
-                // SAFETY: trimmed 是从有效 UTF-8 字符串 trim 得到的，
-                // make_ascii_lowercase 保持 UTF-8 有效性
-                let result = unsafe {
-                    ::core::str::from_utf8_unchecked(
-                        val.as_bytes().get_unchecked(start..start + len),
-                    )
-                };
+            // SAFETY: trimmed 是从有效 UTF-8 字符串 trim 得到的，
+            // make_ascii_lowercase 保持 UTF-8 有效性
+            let result = unsafe {
+                ::core::str::from_utf8_unchecked(val.as_bytes().get_unchecked(start..start + len))
+            };
 
-                match result {
-                    "true" | "1" => true,
-                    "false" | "0" => false,
-                    _ => default,
-                }
-            })
-            .unwrap_or(default)
+            match result {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            }
+        })
     }
 }
 
 impl ParseFromEnv for &'static str {
     type Result = Cow<'static, str>;
     #[inline]
-    fn parse_from_env(key: &str, default: &'static str) -> Cow<'static, str> {
+    fn parse_from_env(key: &str) -> Option<Cow<'static, str>> {
         match ::std::env::var(key) {
             Ok(mut value) => {
                 let trimmed = value.trim();
@@ -109,10 +107,10 @@ impl ParseFromEnv for &'static str {
 
                 if trimmed_len == 0 {
                     // 如果 trim 后为空，使用默认值（不分配）
-                    Cow::Borrowed(default)
+                    None
                 } else if trimmed_len == value.len() {
                     // 不需要 trim，直接使用
-                    Cow::Owned(value)
+                    Some(Cow::Owned(value))
                 } else {
                     // 需要 trim - 就地修改
                     let start_offset = trimmed.as_ptr() as usize - value.as_ptr() as usize;
@@ -135,10 +133,10 @@ impl ParseFromEnv for &'static str {
                         vec.set_len(trimmed_len);
                     }
 
-                    Cow::Owned(value)
+                    Some(Cow::Owned(value))
                 }
             }
-            Err(_) => Cow::Borrowed(default),
+            Err(_) => None,
         }
     }
 }
@@ -148,8 +146,8 @@ macro_rules! impl_parse_num_from_env {
         $(
             impl ParseFromEnv for $ty {
                 #[inline]
-                fn parse_from_env(key: &str, default: $ty) -> $ty {
-                    ::std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+                fn parse_from_env(key: &str) -> Option<$ty> {
+                    ::std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
                 }
             }
         )*
@@ -159,9 +157,9 @@ macro_rules! impl_parse_num_from_env {
 impl_parse_num_from_env!(i8 u8 i16 u16 i32 u32 i64 u64 i128 u128 isize usize);
 
 impl ParseFromEnv for duration_fmt::DurationFormat {
-    fn parse_from_env(key: &str, default: Self) -> Self::Result {
-        let s = <&'static str as ParseFromEnv>::parse_from_env(key, EMPTY_STRING);
-        match &*s {
+    fn parse_from_env(key: &str) -> Option<Self::Result> {
+        let s = <&'static str as ParseFromEnv>::parse_from_env(key)?;
+        Some(match &*s {
             "auto" => Self::Auto,
             "compact" => Self::Compact,
             "standard" => Self::Standard,
@@ -171,28 +169,28 @@ impl ParseFromEnv for duration_fmt::DurationFormat {
             "numeric" => Self::Numeric,
             "verbose" => Self::Verbose,
             "random" => Self::Random,
-            _ => default,
-        }
+            _ => return None,
+        })
     }
 }
 impl ParseFromEnv for duration_fmt::Language {
-    fn parse_from_env(key: &str, default: Self) -> Self::Result {
-        let s = <&'static str as ParseFromEnv>::parse_from_env(key, EMPTY_STRING);
-        match &*s {
+    fn parse_from_env(key: &str) -> Option<Self::Result> {
+        let s = <&'static str as ParseFromEnv>::parse_from_env(key)?;
+        Some(match &*s {
             "english" => Self::English,
             "chinese" => Self::Chinese,
             "japanese" => Self::Japanese,
             "spanish" => Self::Spanish,
             "german" => Self::German,
             "random" => Self::Random,
-            _ => default,
-        }
+            _ => return None,
+        })
     }
 }
 
 #[inline]
 pub fn parse_from_env<T: ParseFromEnv>(key: &str, default: T) -> T::Result {
-    T::parse_from_env(key, default)
+    T::parse_from_env_or(key, default)
 }
 
 pub fn now() -> Duration { now_with_epoch(UNIX_EPOCH, "system time before Unix epoch") }

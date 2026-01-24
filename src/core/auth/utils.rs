@@ -62,7 +62,7 @@ pub(super) fn get_environment_info(
         }),
         exthost_arch: get(headers, STAINLESS_ARCH),
         local_timestamp: request_time.to_utc().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        cursor_version: crate::app::constant::header::cursor_version(),
+        cursor_version: crate::app::model::cursor_version::get(),
     }
 }
 

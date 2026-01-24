@@ -9,10 +9,9 @@ use crate::app::{
             CURSOR_REFERER_URL, CURSOR_STREAMING, CURSOR_TIMEZONE, EMPTY, ENCODING, ENCODINGS,
             FALSE, FS_CLIENT_KEY, GHOST_MODE, HEADER_VALUE_ACCEPT, HOST, JSON, KEEP_ALIVE,
             LANGUAGE, MOBILE_NO, NEW_ONBOARDING_COMPLETED, NO_CACHE, NONE, NOT_A_BRAND, ONE,
-            PLATFORM, PRIORITY, PROTO, PROXY_HOST, REQUEST_ID, SAME_ORIGIN, SEC_CH_UA,
-            SEC_CH_UA_MOBILE, SEC_CH_UA_PLATFORM, SEC_FETCH_DEST, SEC_FETCH_MODE, SEC_FETCH_SITE,
-            SEC_GPC, SESSION_ID, TRAILERS, TRUE, U_EQ_0, U_EQ_1_I, UA, VSCODE_ORIGIN, ZERO,
-            cursor_client_version, header_value_ua_cursor_latest,
+            PRIORITY, PROTO, PROXY_HOST, REQUEST_ID, SAME_ORIGIN, SEC_CH_UA, SEC_CH_UA_MOBILE,
+            SEC_CH_UA_PLATFORM, SEC_FETCH_DEST, SEC_FETCH_MODE, SEC_FETCH_SITE, SEC_GPC,
+            SESSION_ID, TRAILERS, TRUE, U_EQ_0, U_EQ_1_I, VSCODE_ORIGIN, ZERO,
         },
     },
     lazy::{
@@ -20,7 +19,7 @@ use crate::app::{
         pub_reverse_proxy_host, sessions_url, stripe_url, token_refresh_url, token_upgrade_url,
         usage_api_url,
     },
-    model::ExtToken,
+    model::{ExtToken, cursor_version, platform},
 };
 use http::{
     header::{
@@ -132,11 +131,7 @@ fn get_client(
     use_pri: bool,
     real_host: &'static str,
 ) -> RequestBuilder {
-    if use_pri && unsafe { USE_PRI_REVERSE_PROXY } {
-        client
-            .request(method, url)
-            .header(PROXY_HOST, unsafe { super::model::HeaderValue::from_static(real_host).into() })
-    } else if !use_pri && unsafe { USE_PUB_REVERSE_PROXY } {
+    if (use_pri && unsafe { USE_PRI_REVERSE_PROXY }) || (!use_pri && unsafe { USE_PUB_REVERSE_PROXY }) {
         client
             .request(method, url)
             .header(PROXY_HOST, unsafe { super::model::HeaderValue::from_static(real_host).into() })
@@ -223,7 +218,7 @@ pub fn build_client_request(req: AiServiceRequest) -> RequestBuilder {
             req.ext_token.checksum.to_str(&mut buf);
             HeaderValue::from_bytes(&buf).into()
         })
-        .header(CURSOR_CLIENT_VERSION, cursor_client_version())
+        .header(CURSOR_CLIENT_VERSION, cursor_version::client_version())
         .opt_header_map(CURSOR_CONFIG_VERSION, req.ext_token.config_version, |v| {
             v.hyphenated().encode_lower(unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; 36]) });
             unsafe { HeaderValue::from_bytes(buf.get_unchecked(..36)).into() }
@@ -260,15 +255,15 @@ pub fn build_stripe_request(
 
     builder
         .version(http::Version::HTTP_2)
-        .header(SEC_CH_UA_PLATFORM, PLATFORM)
+        .header(SEC_CH_UA_PLATFORM, platform::current().as_header_value())
         .header(AUTHORIZATION, bearer_token)
-        .header(CURSOR_CLIENT_VERSION, cursor_client_version())
+        .header(CURSOR_CLIENT_VERSION, cursor_version::client_version())
         .header(NEW_ONBOARDING_COMPLETED, FALSE)
         .header(SEC_CH_UA, NOT_A_BRAND)
         .header(SEC_CH_UA_MOBILE, MOBILE_NO)
         // skip traceparent
         .header(GHOST_MODE, TRUE)
-        .header(USER_AGENT, header_value_ua_cursor_latest())
+        .header(USER_AGENT, cursor_version::ua_cursor())
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
         .header(ORIGIN, VSCODE_ORIGIN)
         .header(SEC_FETCH_SITE, CROSS_SITE)
@@ -295,7 +290,7 @@ pub fn build_usage_request(
     builder
         .version(http::Version::HTTP_2)
         // .header(HOST, host)
-        .header(USER_AGENT, UA)
+        .header(USER_AGENT, platform::current().web_ua())
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(ACCEPT_ENCODING, ENCODINGS)
@@ -393,7 +388,7 @@ pub fn build_token_upgrade_request(
     builder
         .version(http::Version::HTTP_2)
         // .header(HOST, host)
-        .header(USER_AGENT, UA)
+        .header(USER_AGENT, platform::current().web_ua())
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(ACCEPT_ENCODING, ENCODINGS)
@@ -422,7 +417,7 @@ pub fn build_token_poll_request(client: &Client, url: Url, use_pri: bool) -> Req
         .header(ACCEPT_ENCODING, ENCODINGS)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(CONTENT_LENGTH, ZERO)
-        .header(USER_AGENT, header_value_ua_cursor_latest())
+        .header(USER_AGENT, cursor_version::ua_cursor())
         .header(ORIGIN, VSCODE_ORIGIN)
         .header(GHOST_MODE, TRUE)
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
@@ -450,7 +445,7 @@ pub fn build_token_refresh_request(
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(CONTENT_TYPE, JSON)
         .header(CONTENT_LENGTH, HeaderValue::from_integer(body.len()))
-        .header(USER_AGENT, header_value_ua_cursor_latest())
+        .header(USER_AGENT, cursor_version::ua_cursor())
         .header(ORIGIN, VSCODE_ORIGIN)
         .header(GHOST_MODE, TRUE)
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
@@ -469,7 +464,7 @@ pub fn build_proto_web_request(
     builder
         .version(http::Version::HTTP_2)
         // .header(HOST, host)
-        .header(USER_AGENT, UA)
+        .header(USER_AGENT, platform::current().web_ua())
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(ACCEPT_ENCODING, ENCODINGS)
@@ -502,7 +497,7 @@ pub fn build_sessions_request(
     builder
         .version(http::Version::HTTP_2)
         // .header(HOST, host)
-        .header(USER_AGENT, UA)
+        .header(USER_AGENT, platform::current().web_ua())
         .header(ACCEPT, HEADER_VALUE_ACCEPT)
         .header(ACCEPT_LANGUAGE, LANGUAGE)
         .header(ACCEPT_ENCODING, ENCODINGS)

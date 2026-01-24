@@ -6,7 +6,7 @@
 //! 特别适用于与 JavaScript 交互时避免精度损失的场景。
 
 use core::{fmt, marker::PhantomData};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde_core::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// 密封特征，限制可以被字符串化的类型
 mod private {

@@ -41,7 +41,7 @@ pub enum LogCommand {
     },
     // 添加一条日志
     AddLog {
-        log: RequestLog,
+        log: Box<RequestLog>,
         token: ExtToken,
     },
     // 获取下一个日志ID

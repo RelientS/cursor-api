@@ -183,7 +183,7 @@ impl TokenQueue {
     pub fn remove(
         &mut self,
         token_key: &TokenKey,
-        tokens: &Vec<Option<super::TokenInfo>>,
+        tokens: &[Option<super::TokenInfo>],
     ) -> Option<usize> {
         let vec_index = self.map.remove(token_key)?;
 

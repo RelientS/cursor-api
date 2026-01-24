@@ -156,7 +156,7 @@ impl<'de> ::serde::Deserialize<'de> for Randomness {
 const _: [u8; 8] = [0; core::mem::size_of::<Randomness>()];
 const _: () = assert!(core::mem::align_of::<Randomness>() == 8);
 
-#[derive(Clone, Copy, PartialEq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Subject {
     pub provider: Provider,
     pub id: UserId,
@@ -378,7 +378,7 @@ impl<'de> ::serde::Deserialize<'de> for UserId {
 const _: [u8; 16] = [0; core::mem::size_of::<UserId>()];
 const _: () = assert!(core::mem::align_of::<UserId>() == 1);
 
-#[derive(Clone, Copy, PartialEq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::rkyv::Archive, ::rkyv::Deserialize, ::rkyv::Serialize)]
 pub struct Duration {
     pub start: i64,
     pub end: i64,
@@ -428,7 +428,7 @@ impl fmt::Display for TokenError {
     }
 }
 
-#[derive(Clone, Copy, Hash)]
+#[derive(Clone, Copy)]
 pub struct RawToken {
     /// 用户标识符
     pub subject: Subject,
@@ -444,7 +444,30 @@ pub struct RawToken {
 
 impl PartialEq for RawToken {
     #[inline]
-    fn eq(&self, other: &Self) -> bool { self.signature == other.signature }
+    fn eq(&self, other: &Self) -> bool {
+        if self.signature != other.signature {
+            return false;
+        };
+        core::intrinsics::likely(
+            self.subject == other.subject
+                && self.duration == other.duration
+                && self.randomness == other.randomness
+                && self.is_session == other.is_session,
+        )
+    }
+}
+
+impl Eq for RawToken {}
+
+impl ::core::hash::Hash for RawToken {
+    #[inline]
+    fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+        self.signature.hash(state);
+        self.subject.hash(state);
+        self.duration.hash(state);
+        self.randomness.hash(state);
+        self.is_session.hash(state);
+    }
 }
 
 impl RawToken {

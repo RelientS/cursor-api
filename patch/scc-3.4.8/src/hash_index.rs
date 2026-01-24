@@ -1,4 +1,4 @@
-//! [`HashIndex`] is a read-optimized concurrent hash map.
+//! [`HashIndex`] is a read-optimized asynchronous/concurrent hash map.
 
 use std::collections::hash_map::RandomState;
 use std::fmt::{self, Debug};
@@ -21,11 +21,11 @@ use super::hash_table::bucket::{Bucket, EntryPtr, INDEX};
 use super::hash_table::bucket_array::BucketArray;
 use super::hash_table::{HashTable, LockedBucket};
 
-/// Scalable concurrent hash index.
+/// Scalable asynchronous/concurrent hash index.
 ///
-/// [`HashIndex`] is a concurrent hash map data structure optimized for parallel read operations.
-/// The key characteristics of [`HashIndex`] are similar to that of [`HashMap`](super::HashMap)
-/// except its read operations are lock-free.
+/// [`HashIndex`] is an asynchronous/concurrent hash map data structure optimized for parallel read
+/// operations. The key characteristics of [`HashIndex`] are similar to that of
+/// [`HashMap`](super::HashMap) except its read operations are lock-free.
 ///
 /// ## The key differences between [`HashIndex`] and [`HashMap`](crate::HashMap).
 ///
@@ -430,7 +430,7 @@ where
         let mut entry = None;
         self.for_each_writer_async(0, 0, |locked_bucket, _| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&locked_bucket.writer) {
+            while entry_ptr.find_next(&locked_bucket.writer) {
                 let (k, v) = locked_bucket.entry(&entry_ptr);
                 if pred(k, v) {
                     entry = Some(OccupiedEntry {
@@ -438,10 +438,10 @@ where
                         locked_bucket,
                         entry_ptr,
                     });
-                    return true;
+                    return false;
                 }
             }
-            false
+            true
         })
         .await;
         entry
@@ -472,7 +472,7 @@ where
         let guard = Guard::new();
         self.for_each_writer_sync(0, 0, &guard, |locked_bucket, _| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&locked_bucket.writer) {
+            while entry_ptr.find_next(&locked_bucket.writer) {
                 let (k, v) = locked_bucket.entry(&entry_ptr);
                 if pred(k, v) {
                     entry = Some(OccupiedEntry {
@@ -480,10 +480,10 @@ where
                         locked_bucket,
                         entry_ptr,
                     });
-                    return true;
+                    return false;
                 }
             }
-            false
+            true
         });
         entry
     }
@@ -871,7 +871,7 @@ where
         let mut result = true;
         self.for_each_reader_async(|reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&reader) {
+            while entry_ptr.find_next(&reader) {
                 let (k, v) = entry_ptr.get(data_block);
                 if !f(k, v) {
                     result = false;
@@ -915,7 +915,7 @@ where
         let guard = Guard::new();
         self.for_each_reader_sync(&guard, |reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&reader) {
+            while entry_ptr.find_next(&reader) {
                 let (k, v) = entry_ptr.get(data_block);
                 if !f(k, v) {
                     result = false;
@@ -948,7 +948,7 @@ where
         self.reclaim_memory();
         self.for_each_writer_async(0, 0, |mut locked_bucket, removed| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&locked_bucket.writer) {
+            while entry_ptr.find_next(&locked_bucket.writer) {
                 let (k, v) = locked_bucket.entry_mut(&mut entry_ptr);
                 if !pred(k, v) {
                     locked_bucket
@@ -957,7 +957,7 @@ where
                     *removed = true;
                 }
             }
-            false
+            true
         })
         .await;
     }
@@ -991,14 +991,14 @@ where
         let guard = Guard::new();
         self.for_each_writer_sync(0, 0, &guard, |mut locked_bucket, removed| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&locked_bucket.writer) {
+            while entry_ptr.find_next(&locked_bucket.writer) {
                 let (k, v) = locked_bucket.entry_mut(&mut entry_ptr);
                 if !pred(k, v) {
                     locked_bucket.writer.mark_removed(&mut entry_ptr, &guard);
                     *removed = true;
                 }
             }
-            false
+            true
         });
     }
 
@@ -1135,7 +1135,8 @@ where
     where
         Q: Equivalent<K> + Hash + ?Sized,
     {
-        self.calculate_bucket_index(key)
+        let hash = self.hash(key);
+        self.calculate_bucket_index(hash)
     }
 
     /// Returns an [`Iter`].
@@ -2082,8 +2083,8 @@ where
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Iter")
-            .field("current_index", &self.index)
-            .field("current_entry_ptr", &self.entry_ptr)
+            .field("current_bucket_index", &self.index)
+            .field("current_index_in_bucket", &self.entry_ptr.index())
             .finish()
     }
 }
@@ -2116,7 +2117,7 @@ where
         loop {
             if let Some(bucket) = self.bucket.take() {
                 // Move to the next entry in the bucket.
-                if self.entry_ptr.move_to_next(bucket) {
+                if self.entry_ptr.find_next(bucket) {
                     let (k, v) = self.entry_ptr.get(array.data_block(self.index));
                     self.bucket.replace(bucket);
                     return Some((k, v));

@@ -41,8 +41,18 @@ dynamic_key_secret = ""
 web_references_included = false
 
 # 模型数据获取模式
-# - 可选值:
-#   - truncate        - 覆盖模式(默认):    完全使用新获取的模型列表，替换所有现有模型
-#   - append:truncate - 智能合并模式:      保留现有模型中不在新列表中的，同时添加或更新新模型
-#   - append          - 纯追加模式:        只添加不存在的新模型，已有模型保持不变
+# 可选值:
+# - truncate        - 覆盖模式(默认):    完全使用新获取的模型列表，替换所有现有模型
+# - append:truncate - 智能合并模式:      保留现有模型中不在新列表中的，同时添加或更新新模型
+# - append          - 纯追加模式:        只添加不存在的新模型，已有模型保持不变
 raw_model_fetch_mode = "truncate"
+
+# 模拟平台(默认{DEFAULT_PLATFORM})
+# 可选值:
+# - Windows
+# - macOS
+# - Linux
+emulated_platform = "{DEFAULT_PLATFORM}"
+
+# Cursor客户端版本
+cursor_client_version = "2.0.0"

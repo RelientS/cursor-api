@@ -323,7 +323,6 @@ impl HumanDuration {
     /// let duration = Duration::from_secs(65);
     /// let human_duration = HumanDuration::new(duration);
     /// ```
-    #[must_use]
     #[inline]
     pub const fn new(duration: Duration) -> Self {
         Self { duration, format: DurationFormat::Auto, language: Language::Chinese }
@@ -949,7 +948,6 @@ impl fmt::Display for HumanDuration {
 ///     .format(DurationFormat::Compact)
 ///     .language(Language::English));
 /// ```
-#[must_use]
 #[inline(always)]
 pub const fn human(duration: Duration) -> HumanDuration { HumanDuration::new(duration) }
 

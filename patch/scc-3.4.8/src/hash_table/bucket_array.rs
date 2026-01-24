@@ -206,11 +206,9 @@ impl<K, V, L: LruList, const TYPE: char> Drop for BucketArray<K, V, L, TYPE> {
         } else {
             self.num_cleared_buckets.load(Relaxed)
         };
-        if num_cleared_buckets < self.array_len {
-            for index in num_cleared_buckets..self.array_len {
-                self.bucket(index).drop_entries(self.data_block(index));
-            }
-        }
+        (num_cleared_buckets..self.array_len).for_each(|i| {
+            self.bucket(i).drop_entries(self.data_block(i));
+        });
 
         #[cfg(feature = "loom")]
         for i in 0..self.array_len {

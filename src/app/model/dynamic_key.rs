@@ -40,7 +40,7 @@ impl Secret {
 
             if ok
                 && hex_pairs.len() < result.len()
-                && let Some(&hi) = hex_rests.get(0)
+                && let Some(&hi) = hex_rests.first()
             {
                 if let Some(byte) = hex_to_byte(hi, b'0') {
                     result[hex_pairs.len()] = byte;

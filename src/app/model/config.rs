@@ -1,5 +1,8 @@
 use super::{FetchMode, UsageCheck, VisionAbility};
-use crate::app::{lazy::CONFIG_FILE_PATH, model::Hash};
+use crate::app::{
+    lazy::CONFIG_FILE_PATH,
+    model::{Hash, cursor_version::Version, platform::PlatformType},
+};
 use arc_swap::ArcSwap;
 use byte_str::ByteStr;
 use manually_init::ManuallyInit;
@@ -16,6 +19,8 @@ pub struct AppConfig {
     pub share_token: String,
     pub web_references_included: bool,
     pub raw_model_fetch_mode: FetchMode,
+    pub emulated_platform: PlatformType,
+    pub cursor_client_version: Version,
 }
 
 pub struct AppConfigManager {
@@ -70,7 +75,7 @@ impl AppConfig {
             super::super::lazy::init_all_cursor_urls();
             super::super::lazy::log::init();
             super::hash::init();
-            super::super::constant::header::initialize_cursor_version();
+            // super::super::constant::header::initialize_cursor_version();
             // super::super::constant::init_thinking_tags();
             crate::core::model::init_resolver();
             super::token::parse_providers();
@@ -78,16 +83,24 @@ impl AppConfig {
         }
         crate::core::constant::create_models();
 
-        let (content, config) = if let Ok(s) = std::fs::read_to_string(&*CONFIG_FILE_PATH)
-            && let Ok(config) = toml::from_str(&s)
-        {
-            (s.into(), config)
+        let (content, config) = if let Ok(s) = std::fs::read_to_string(&*CONFIG_FILE_PATH) {
+            match toml::from_str(&s) {
+                Ok(config) => (s.into(), config),
+                Err(e) => {
+                    eprintln!("Warning: configuration parse failed: {e}");
+                    (ByteStr::new(), AppConfig::default())
+                }
+            }
         } else {
             (ByteStr::new(), AppConfig::default())
         };
         {
+            use super::cursor_version::init;
+            init(config.emulated_platform, config.cursor_client_version)
+        }
+        {
             use super::dynamic_key::{Secret, init};
-            init(Secret::parse_str(&config.dynamic_key_secret).0.unwrap_or_else(|| [0; 64]));
+            init(Secret::parse_str(&config.dynamic_key_secret).0.unwrap_or([0; 64]));
         }
         APP_CONFIG.init(ArcSwap::from_pointee(AppConfigManager {
             hash: hash(&config),
@@ -98,10 +111,19 @@ impl AppConfig {
 
     pub fn update(config: Self, content: ByteStr) -> bool {
         let hash = hash(&config);
-        if APP_CONFIG.load().hash != hash {
-            if APP_CONFIG.load().dynamic_key_secret != config.dynamic_key_secret {
+        let guard = APP_CONFIG.load();
+        if guard.hash != hash {
+            {
+                use super::cursor_version::{update, update_platform_only};
+                if guard.cursor_client_version != config.cursor_client_version {
+                    update(config.emulated_platform, config.cursor_client_version)
+                } else if guard.emulated_platform != config.emulated_platform {
+                    update_platform_only(config.emulated_platform)
+                }
+            }
+            if guard.dynamic_key_secret != config.dynamic_key_secret {
                 use super::dynamic_key::{Secret, update};
-                update(Secret::parse_str(&config.dynamic_key_secret).0.unwrap_or_else(|| [0; 64]));
+                update(Secret::parse_str(&config.dynamic_key_secret).0.unwrap_or([0; 64]));
             }
             APP_CONFIG.store(alloc::sync::Arc::new(AppConfigManager {
                 hash,
@@ -130,6 +152,7 @@ impl AppConfig {
         // share_token: Str;
         web_references_included: bool as is_web_references_included;
         raw_model_fetch_mode: FetchMode;
+        emulated_platform: PlatformType;
     );
 
     #[inline]
@@ -148,19 +171,23 @@ fn hash(config: &AppConfig) -> Hash {
     hasher.update(b"vision_ability");
     hasher.update(config.vision_ability.as_str().as_bytes());
     hasher.update(b"slow_pool_enabled");
-    hasher.update(&[config.slow_pool_enabled as u8]);
+    hasher.update([config.slow_pool_enabled as u8]);
     hasher.update(b"long_context_enabled");
-    hasher.update(&[config.long_context_enabled as u8]);
+    hasher.update([config.long_context_enabled as u8]);
     hasher.update(b"model_usage_checks");
     config.model_usage_checks.hash(&mut hasher);
     hasher.update(b"dynamic_key_secret");
-    hasher.update(config.dynamic_key_secret.as_str().as_bytes());
+    hasher.update(config.dynamic_key_secret.as_bytes());
     hasher.update(b"share_token");
-    hasher.update(config.share_token.as_str().as_bytes());
+    hasher.update(config.share_token.as_bytes());
     hasher.update(b"web_references_included");
-    hasher.update(&[config.web_references_included as u8]);
+    hasher.update([config.web_references_included as u8]);
     hasher.update(b"raw_model_fetch_mode");
     hasher.update(config.raw_model_fetch_mode.as_str().as_bytes());
+    hasher.update(b"emulated_platform");
+    hasher.update(config.emulated_platform.as_str().as_bytes());
+    hasher.update(b"cursor_client_version");
+    hasher.update(config.cursor_client_version.to_bytes());
     Hash(hasher.finalize().0)
 }
 

@@ -2,9 +2,8 @@
 
 [![Cargo](https://img.shields.io/crates/v/scc)](https://crates.io/crates/scc)
 ![Crates.io](https://img.shields.io/crates/l/scc)
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/wvwwvwwv/scalable-concurrent-containers/scc.yml?branch=main)
 
-A collection of high-performance containers providing both asynchronous and synchronous interfaces.
+A collection of high-performance asynchronous/concurrent containers providing both asynchronous and synchronous interfaces.
 
 #### Features
 
@@ -14,15 +13,15 @@ A collection of high-performance containers providing both asynchronous and sync
 
 #### Concurrent Containers
 
-- [`HashMap`](#hashmap) is a concurrent hash map.
-- [`HashSet`](#hashset) is a concurrent hash set.
-- [`HashIndex`](#hashindex) is a read-optimized concurrent hash map.
-- [`HashCache`](#hashcache) is a 32-way associative concurrent cache backed by [`HashMap`](#hashmap).
-- [`TreeIndex`](#treeindex) is a read-optimized concurrent B-plus tree.
+- [`HashMap`](#hashmap) is an asynchronous/concurrent hash map.
+- [`HashSet`](#hashset) is an asynchronous/concurrent hash set.
+- [`HashIndex`](#hashindex) is a read-optimized asynchronous/concurrent hash map.
+- [`HashCache`](#hashcache) is a 32-way associative asynchronous/concurrent cache backed by [`HashMap`](#hashmap).
+- [`TreeIndex`](#treeindex) is a read-optimized asynchronous/concurrent B-plus tree.
 
 ## `HashMap`
 
-[`HashMap`](#hashmap) is a concurrent hash map optimized for highly parallel write-heavy workloads. [`HashMap`](#hashmap) is structured as a lock-free stack of entry bucket arrays. The entry bucket array is managed by [`sdd`](https://crates.io/crates/sdd), thus enabling lock-free access to it and non-blocking container resizing. Each bucket is a fixed-size array of entries, protected by a read-write lock that simultaneously provides blocking and asynchronous methods.
+[`HashMap`](#hashmap) is an asynchronous/concurrent hash map optimized for highly parallel write-heavy workloads. [`HashMap`](#hashmap) is structured as a lock-free stack of entry bucket arrays. The entry bucket array is managed by [`sdd`](https://crates.io/crates/sdd), thus enabling lock-free access to it and non-blocking container resizing. Each bucket is a fixed-size array of entries, protected by a read-write lock that simultaneously provides blocking and asynchronous methods.
 
 ### Locking behavior
 
@@ -213,7 +212,7 @@ assert_eq!(iter.next(), None);
 
 ## `HashCache`
 
-[`HashCache`](#hashcache) is a 32-way associative concurrent cache based on the [`HashMap`](#hashmap) implementation. [`HashCache`](#hashcache) does not keep track of the least recently used entry in the entire cache. Instead, each bucket maintains a doubly linked list of occupied entries, which is updated on entry access.
+[`HashCache`](#hashcache) is a 32-way associative asynchronous/concurrent cache based on the [`HashMap`](#hashmap) implementation. [`HashCache`](#hashcache) does not keep track of the least recently used entry in the entire cache. Instead, each bucket maintains a doubly linked list of occupied entries, which is updated on entry access.
 
 ### Examples
 
@@ -328,4 +327,4 @@ The expected tail latency of a distribution of latencies of 1048576 insertion op
 
 - [Results on Intel Xeon (48 cores, avx2)](https://codeberg.org/wvwwvwwv/conc-map-bench).
 
-## [Changelog](https://github.com/wvwwvwwv/scalable-concurrent-containers/blob/main/CHANGELOG.md)
+## [Changelog](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/src/branch/main/CHANGELOG.md)

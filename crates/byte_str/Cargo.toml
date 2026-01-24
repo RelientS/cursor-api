@@ -10,10 +10,10 @@ license = "MIT"
 any_all_workaround = { version = "0.1", optional = true }
 bytes = { version = "1", default-features = false }
 cfg-if = "1"
-serde = { version = "1", default-features = false, optional = true }
+serde_core = { version = "1", default-features = false, optional = true }
 
 [features]
 default = ["nightly"]
 std = ["bytes/std"]
-serde = ["dep:serde"]
+serde = ["dep:serde_core"]
 nightly = ["dep:any_all_workaround"]

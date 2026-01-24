@@ -69,7 +69,7 @@ fn __intern(pool: &HashSet<&'static str>, s: &str) -> (Id, bool) {
     };
 
     let id = match pool.raw_entry().from_key_sync(key) {
-        RawEntry::Occupied(entry) => Id::from_ref(*entry.key()),
+        RawEntry::Occupied(entry) => Id::from_ref(entry.key()),
         RawEntry::Vacant(entry) => {
             let leaked = unsafe { alloc_ids(s) };
             entry.insert(leaked.non_suffix(), ());

@@ -8,7 +8,13 @@ use super::{
     },
     model::{DateTime, GcppHost},
 };
-use crate::common::{model::HeaderValue, utils::parse_from_env};
+use crate::common::{
+    model::{
+        HeaderValue,
+        niche_types::{NonNegativeI8, NonNegativeI16},
+    },
+    utils::{ParseFromEnv, parse_from_env},
+};
 use alloc::borrow::Cow;
 use manually_init::ManuallyInit;
 pub use path::{
@@ -26,6 +32,7 @@ pub static START_TIME: ManuallyInit<DateTime> = ManuallyInit::new();
 pub fn init_start_time() { START_TIME.init(DateTime::now()) }
 
 #[inline]
+#[rustfmt::skip]
 pub fn init() {
     PRI_REVERSE_PROXY_HOST.init(parse_from_env("PRI_REVERSE_PROXY_HOST", EMPTY_STRING));
     PUB_REVERSE_PROXY_HOST.init(parse_from_env("PUB_REVERSE_PROXY_HOST", EMPTY_STRING));
@@ -39,7 +46,11 @@ pub fn init() {
         USE_PUB_REVERSE_PROXY = !PUB_REVERSE_PROXY_HOST.is_empty();
     }
     TCP_KEEPALIVE
-        .init(parse_from_env("TCP_KEEPALIVE", DEFAULT_TCP_KEEPALIVE).min(MAX_TCP_KEEPALIVE));
+        .init(parse_from_env("TCP_KEEPALIVE", ToDuration(Some(DEFAULT_TCP_KEEPALIVE))));
+    TCP_KEEPALIVE_INTERVAL
+        .init(parse_from_env("TCP_KEEPALIVE_INTERVAL", ToDuration(Some(DEFAULT_TCP_KEEPALIVE_INTERVAL))));
+    TCP_KEEPALIVE_RETRIES
+        .init(parse_from_env("TCP_KEEPALIVE_RETRIES", ToCount(Some(DEFAULT_TCP_KEEPALIVE_RETRIES))));
     SERVICE_TIMEOUT
         .init(parse_from_env("SERVICE_TIMEOUT", DEFAULT_SERVICE_TIMEOUT).min(MAX_SERVICE_TIMEOUT));
     REAL_USAGE.init(parse_from_env("REAL_USAGE", true));
@@ -254,13 +265,61 @@ def_cursor_api_url! {
 }
 
 // TCP 和超时相关常量
-const DEFAULT_TCP_KEEPALIVE: u64 = 90;
-const MAX_TCP_KEEPALIVE: u64 = 600;
-pub static TCP_KEEPALIVE: ManuallyInit<u64> = ManuallyInit::new();
+const DEFAULT_TCP_KEEPALIVE: NonNegativeI16 = NonNegativeI16::new(15).unwrap();
+const MAX_TCP_KEEPALIVE: NonNegativeI16 = NonNegativeI16::new(600).unwrap();
+pub static TCP_KEEPALIVE: ManuallyInit<ToDuration<MAX_TCP_KEEPALIVE>> = ManuallyInit::new();
 
-const DEFAULT_SERVICE_TIMEOUT: u64 = 30;
-const MAX_SERVICE_TIMEOUT: u64 = 600;
-pub static SERVICE_TIMEOUT: ManuallyInit<u64> = ManuallyInit::new();
+const DEFAULT_TCP_KEEPALIVE_INTERVAL: NonNegativeI16 = NonNegativeI16::new(15).unwrap();
+const MAX_TCP_KEEPALIVE_INTERVAL: NonNegativeI16 = NonNegativeI16::new(600).unwrap();
+pub static TCP_KEEPALIVE_INTERVAL: ManuallyInit<ToDuration<MAX_TCP_KEEPALIVE_INTERVAL>> =
+    ManuallyInit::new();
+
+const DEFAULT_TCP_KEEPALIVE_RETRIES: NonNegativeI8 = NonNegativeI8::new(3).unwrap();
+const MAX_TCP_KEEPALIVE_RETRIES: NonNegativeI8 = NonNegativeI8::new(20).unwrap();
+pub static TCP_KEEPALIVE_RETRIES: ManuallyInit<ToCount<MAX_TCP_KEEPALIVE_RETRIES>> =
+    ManuallyInit::new();
+
+const DEFAULT_SERVICE_TIMEOUT: u16 = 30;
+const MAX_SERVICE_TIMEOUT: u16 = 600;
+pub static SERVICE_TIMEOUT: ManuallyInit<u16> = ManuallyInit::new();
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToDuration<const MAX: NonNegativeI16>(Option<NonNegativeI16>);
+
+impl<const MAX: NonNegativeI16> ParseFromEnv for ToDuration<MAX> {
+    fn parse_from_env(key: &str) -> Option<Self::Result> {
+        let v = i32::parse_from_env(key)?;
+        Some(if v < 0 {
+            Self(None)
+        } else {
+            Self(NonNegativeI16::new(v.min(MAX.as_inner() as i32) as i16))
+        })
+    }
+}
+
+impl<const MAX: NonNegativeI16> ToDuration<MAX> {
+    pub fn to_duration(self) -> Option<core::time::Duration> {
+        self.0.map(|v| core::time::Duration::from_secs(v.as_inner() as _))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToCount<const MAX: NonNegativeI8>(Option<NonNegativeI8>);
+
+impl<const MAX: NonNegativeI8> ParseFromEnv for ToCount<MAX> {
+    fn parse_from_env(key: &str) -> Option<Self::Result> {
+        let v = i16::parse_from_env(key)?;
+        Some(if v < 0 {
+            Self(None)
+        } else {
+            Self(NonNegativeI8::new(v.min(MAX.as_inner() as i16) as i8))
+        })
+    }
+}
+
+impl<const MAX: NonNegativeI8> ToCount<MAX> {
+    pub fn to_count(self) -> Option<u32> { self.0.map(|v| v.as_inner() as _) }
+}
 
 pub static REAL_USAGE: ManuallyInit<bool> = ManuallyInit::new();
 

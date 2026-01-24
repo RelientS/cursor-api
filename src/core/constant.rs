@@ -6,7 +6,10 @@ use crate::{
         constant::UNKNOWN,
         model::{AppConfig, FetchMode, ModelIdSource},
     },
-    common::model::raw_json::{RawJson, to_raw_json},
+    common::model::{
+        cached::JsonCached,
+        raw_json::RawJson,
+    },
     core::model::ModelsResponse,
 };
 use alloc::sync::Arc;
@@ -231,9 +234,9 @@ macro_rules! create_models {
             let find_ids = HashMap::from_iter(models.iter().enumerate().map(|(i, m)| (m.id(), i)));
 
             INSTANCE.init(ArcSwap::from_pointee(Models {
-                models: __unwrap!(Cached::new(ModelsResponse(models))),
+                models: __unwrap!(JsonCached::new(ModelsResponse(models))),
                 raw_models: None,
-                ids: __unwrap!(Cached::new(ids)),
+                ids: __unwrap!(JsonCached::new(ids)),
                 find_ids,
                 last_update: Instant::now(),
             }))
@@ -241,35 +244,10 @@ macro_rules! create_models {
     };
 }
 
-pub struct Cached<T: Sized + serde::Serialize> {
-    value: T,
-    json: RawJson,
-}
-
-impl<T: Sized + serde::Serialize> Cached<T> {
-    #[inline]
-    pub fn new(value: T) -> serde_json::Result<Self> {
-        Ok(Self { json: to_raw_json(&value)?, value })
-    }
-    #[inline]
-    pub fn cache(&self) -> RawJson { self.json.clone() }
-}
-
-impl<T: Sized + serde::Serialize> core::ops::Deref for Cached<T> {
-    type Target = T;
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target { &self.value }
-}
-
-impl<T: Sized + serde::Serialize> core::ops::DerefMut for Cached<T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.value }
-}
-
 pub struct Models {
-    models: Cached<ModelsResponse>,
-    raw_models: Option<Cached<crate::core::aiserver::v1::AvailableModelsResponse>>,
-    ids: Cached<Vec<&'static str>>,
+    models: JsonCached<ModelsResponse>,
+    raw_models: Option<JsonCached<crate::core::aiserver::v1::AvailableModelsResponse>>,
+    ids: JsonCached<Vec<&'static str>>,
 
     find_ids: HashMap<&'static str, usize>,
     last_update: Instant,
@@ -284,7 +262,7 @@ impl Models {
 
     #[inline]
     pub fn get_raw_models_cache() -> Option<RawJson> {
-        Self::get().raw_models.as_ref().map(Cached::cache)
+        Self::get().raw_models.as_ref().map(JsonCached::cache)
     }
 
     #[inline]
@@ -357,6 +335,7 @@ impl Models {
                         return None;
                     }
 
+                    #[allow(clippy::get_first)]
                     match *bytes.get(0)? {
                         b'g' => match *bytes.get(1)? {
                             b'p' => Some(OPENAI), // g + p → "gp" (gpt)
@@ -395,7 +374,8 @@ impl Models {
                 .unwrap_or(UNKNOWN)
             };
             let is_thinking = model.supports_thinking.unwrap_or_default();
-            let is_image = if server_id == DEFAULT { true } else { model.supports_images.unwrap_or_default() };
+            let is_image =
+                if server_id == DEFAULT { true } else { model.supports_images.unwrap_or_default() };
             let is_max = model.supports_max_mode.unwrap_or_default();
             let is_non_max = model.supports_non_max_mode.unwrap_or_default();
 
@@ -514,9 +494,9 @@ impl Models {
         let find_ids = HashMap::from_iter(new_models.iter().enumerate().map(|(i, m)| (m.id(), i)));
 
         INSTANCE.store(Arc::new(Models {
-            models: __unwrap!(Cached::new(ModelsResponse(new_models))),
-            raw_models: Some(__unwrap!(Cached::new(available_models))),
-            ids: __unwrap!(Cached::new(ids)),
+            models: __unwrap!(JsonCached::new(ModelsResponse(new_models))),
+            raw_models: Some(__unwrap!(JsonCached::new(available_models))),
+            ids: __unwrap!(JsonCached::new(ids)),
             find_ids,
             last_update: Instant::now(),
         }));

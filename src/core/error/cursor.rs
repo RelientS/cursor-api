@@ -63,7 +63,7 @@ impl CursorError {
     pub(super) fn code(&self) -> &str { &self.error.code }
 
     pub fn error(&self) -> Option<crate::core::aiserver::v1::error_details::Error> {
-        self.error.details.get(0)?.value.error.get().try_into().ok()
+        self.error.details.first()?.value.error.get().try_into().ok()
     }
 
     #[inline]

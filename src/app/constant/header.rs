@@ -1,10 +1,5 @@
 use crate::common::model::HeaderValue;
 
-mod version;
-pub use version::{
-    cursor_client_version, cursor_version, header_value_ua_cursor_latest, initialize_cursor_version,
-};
-
 /// 定义 HeaderName 常量
 ///
 /// # Example
@@ -39,21 +34,6 @@ macro_rules! def_header_value {
         )+
     };
 }
-
-pub const UA: http::header::HeaderValue = http::header::HeaderValue::from_static(
-    cfg_select! {
-        target_os = "windows" => {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"}
-        target_os = "macos" => {"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"}
-        target_os = "linux" => {"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"}
-    }
-);
-
-pub const PLATFORM: http::header::HeaderValue =
-    http::header::HeaderValue::from_static(cfg_select! {
-        target_os = "windows" => {"\"Windows\""}
-        target_os = "macos" => {"\"macOS\""}
-        target_os = "linux" => {"\"Linux\""}
-    });
 
 def_header_value! {
     (NONE, ""),

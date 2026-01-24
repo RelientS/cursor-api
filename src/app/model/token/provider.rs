@@ -23,13 +23,20 @@ static mut PROVIDERS: &'static [&'static str] = DEFAULT_PROVIDERS;
 ///
 /// 这是一个对静态字符串标识符的包装，
 /// 该标识符会与支持的提供者列表进行验证
-#[derive(Clone, Copy, Hash)]
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct Provider(usize);
 
 impl PartialEq for Provider {
     #[inline]
     fn eq(&self, other: &Self) -> bool { self.0 == other.0 }
+}
+
+impl Eq for Provider {}
+
+impl ::core::hash::Hash for Provider {
+    #[inline]
+    fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) { self.0.hash(state) }
 }
 
 impl fmt::Display for Provider {
@@ -40,7 +47,7 @@ impl fmt::Display for Provider {
 impl Provider {
     #[inline]
     #[allow(static_mut_refs)]
-    pub fn as_str(self) -> &'static str { unsafe { *PROVIDERS.get_unchecked(self.0) } }
+    pub fn as_str(self) -> &'static str { unsafe { PROVIDERS.get_unchecked(self.0) } }
 
     #[inline]
     pub(super) fn from_str(s: &str) -> Result<Self, super::SubjectError> {

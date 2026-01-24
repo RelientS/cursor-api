@@ -3,6 +3,31 @@
 
 ## Version 3
 
+3.4.14
+
+* Implement `DoubleEndedIterator` for `tree_index::Iter`: [#217](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/issues/217).
+
+3.4.13
+
+* Remove the `V: Clone` bound from `TreeIndex`.
+
+3.4.12
+
+* Optimize `TreeIndex` entry iteration.
+
+3.4.11 - 3.4.12
+
+* Code cleanup.
+
+3.4.10
+
+* Minor `Hash*` performance improvements.
+
+3.4.9
+
+* Migrate to [`codeberg`](https://codeberg.org/wvwwvwwv/scalable-concurrent-containers).
+* Better `Hash*` OOM handling.
+
 3.4.8
 
 * Minor updates for `codeberg` migration.

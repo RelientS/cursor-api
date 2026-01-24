@@ -1,13 +1,13 @@
 [package]
 name = "scc"
-description = "A collection of high-performance containers providing both asynchronous and synchronous interfaces"
+description = "A collection of high-performance asynchronous/concurrent containers providing both asynchronous and synchronous interfaces"
 documentation = "https://docs.rs/scc"
-version = "3.4.8"
+version = "3.4.14"
 authors = ["wvwwvwwv <wvwwvwwv@me.com>"]
 edition = "2024"
 rust-version = "1.85.0"
 readme = "README.md"
-repository = "https://github.com/wvwwvwwv/scalable-concurrent-containers/"
+repository = "https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/"
 license = "Apache-2.0"
 categories = ["asynchronous", "caching", "concurrency", "data-structures"]
 keywords = ["async", "cache", "concurrent", "hashmap", "tree"]
@@ -32,7 +32,7 @@ futures = "0.3"
 proptest = "1.9"
 serde_test = "1.0"
 static_assertions = "1.1"
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 
 [[bench]]
 name = "hash_map"

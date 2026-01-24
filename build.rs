@@ -4,18 +4,15 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 #[cfg(not(feature = "use-minified"))]
 use std::fs;
-#[cfg(not(debug_assertions))]
-#[cfg(feature = "__preview")]
-use std::fs::File;
-use std::io::Result;
-#[cfg(not(debug_assertions))]
-#[cfg(feature = "__preview")]
+#[cfg(all(not(debug_assertions), not(feature = "__preview_locked"), feature = "__preview"))]
 use std::io::{Read, Write};
+#[cfg(not(feature = "use-minified"))]
 use std::path::Path;
 #[cfg(not(feature = "use-minified"))]
 use std::path::PathBuf;
 #[cfg(not(feature = "use-minified"))]
 use std::process::Command;
+use std::{fs::File, io::Result};
 
 // 支持的文件类型
 // #[cfg(not(feature = "use-minified"))]
@@ -187,7 +184,15 @@ fn minify_assets() -> Result<()> {
     Ok(())
 }
 
-include!("build_info.rs");
+fn generate_build_info() -> Result<()> {
+    let file = File::create(__build::variables::out_dir().join("build_info.rs"))?;
+    __build::BuildInfo.write_to(file)
+}
+
+fn generate_platform_info() -> Result<()> {
+    let file = File::create(__build::variables::out_dir().join("platform_info.rs"))?;
+    __build::PlatformInfo.write_to(file)
+}
 
 // #[cfg(feature = "__protoc")]
 // macro_rules! proto_attributes {
@@ -202,7 +207,7 @@ include!("build_info.rs");
 
 fn main() -> Result<()> {
     // 更新版本号 - 只在 release 构建时执行
-    #[cfg(all(not(debug_assertions), feature = "__preview"))]
+    #[cfg(all(not(debug_assertions), not(feature = "__preview_locked"), feature = "__preview"))]
     update_version()?;
 
     // #[cfg(feature = "__protoc")]
@@ -345,6 +350,7 @@ fn main() -> Result<()> {
 
     // 生成构建信息文件
     generate_build_info()?;
+    generate_platform_info()?;
 
     Ok(())
 }

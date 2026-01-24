@@ -11,7 +11,7 @@
 extern crate alloc;
 
 #[cfg(feature = "serde")]
-extern crate serde;
+extern crate serde_core;
 
 mod bytes_value;
 mod enum_value;

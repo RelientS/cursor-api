@@ -47,13 +47,10 @@ impl ToolParam for Tool {
 impl ToolResult for (Option<ToolResultContent>, bool) {
     fn is_error(&self) -> bool { self.1 }
     fn size_hint(&self) -> Option<usize> {
-        match self.0 {
-            Some(ref c) => Some(match c {
+        self.0.as_ref().map(|c| match c {
                 ToolResultContent::String(..) => 1,
                 ToolResultContent::Array(cs) => cs.len(),
-            }),
-            None => None,
-        }
+            })
     }
     async fn add_to(self, builder: &mut ToolResultBuilder) -> Result<(), AdapterError> {
         if let Some(c) = self.0 {

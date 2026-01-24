@@ -1,4 +1,5 @@
-//! [`HashCache`] is a concurrent 32-way associative cache backed by [`HashMap`](super::HashMap).
+//! [`HashCache`] is an asynchronous/concurrent 32-way associative cache backed by
+//! [`HashMap`](super::HashMap).
 
 use std::collections::hash_map::RandomState;
 use std::fmt::{self, Debug};
@@ -19,9 +20,9 @@ use super::hash_table::bucket::{CACHE, DoublyLinkedList, EntryPtr};
 use super::hash_table::bucket_array::BucketArray;
 use super::hash_table::{HashTable, LockedBucket};
 
-/// Scalable concurrent 32-way associative cache backed by [`HashMap`](super::HashMap).
+/// Scalable asynchronous/concurrent 32-way associative cache backed by [`HashMap`](super::HashMap).
 ///
-/// [`HashCache`] is a concurrent 32-way associative cache based on the
+/// [`HashCache`] is an asynchronous/concurrent 32-way associative cache based on the
 /// [`HashMap`](super::HashMap) implementation. [`HashCache`] does not keep track of the least
 /// recently used entry in the entire cache. Instead, each bucket maintains a doubly linked list of
 /// occupied entries, updated on access to entries to keep track of the least recently used entries
@@ -826,7 +827,7 @@ where
         let mut result = true;
         self.for_each_reader_async(|reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&reader) {
+            while entry_ptr.find_next(&reader) {
                 let (k, v) = entry_ptr.get(data_block);
                 if !f(k, v) {
                     result = false;
@@ -869,7 +870,7 @@ where
         let guard = Guard::new();
         self.for_each_reader_sync(&guard, |reader, data_block| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&reader) {
+            while entry_ptr.find_next(&reader) {
                 let (k, v) = entry_ptr.get(data_block);
                 if !f(k, v) {
                     result = false;
@@ -916,7 +917,7 @@ where
         let mut result = true;
         self.for_each_writer_async(0, 0, |mut locked_bucket, removed| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&locked_bucket.writer) {
+            while entry_ptr.find_next(&locked_bucket.writer) {
                 let consumable_entry = ConsumableEntry {
                     locked_bucket: &mut locked_bucket,
                     entry_ptr: &mut entry_ptr,
@@ -924,10 +925,10 @@ where
                 };
                 if !f(consumable_entry) {
                     result = false;
-                    return true;
+                    return false;
                 }
             }
-            false
+            true
         })
         .await;
         result
@@ -966,7 +967,7 @@ where
         let guard = Guard::new();
         self.for_each_writer_sync(0, 0, &guard, |mut locked_bucket, removed| {
             let mut entry_ptr = EntryPtr::null();
-            while entry_ptr.move_to_next(&locked_bucket.writer) {
+            while entry_ptr.find_next(&locked_bucket.writer) {
                 let consumable_entry = ConsumableEntry {
                     locked_bucket: &mut locked_bucket,
                     entry_ptr: &mut entry_ptr,
@@ -974,10 +975,10 @@ where
                 };
                 if !f(consumable_entry) {
                     result = false;
-                    return true;
+                    return false;
                 }
             }
-            false
+            true
         });
         result
     }

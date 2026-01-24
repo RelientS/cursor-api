@@ -4,12 +4,12 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
 use sdd::{AtomicShared, Guard, Ptr, Shared, Tag};
 
-use super::internal_node::{self, InternalNode};
-use super::leaf::{InsertResult, Leaf, RemoveResult, Scanner};
-use super::leaf_node::{self, LeafNode};
+use super::internal_node::InternalNode;
+use super::internal_node::Locker as InternalNodeLocker;
+use super::leaf::{InsertResult, Iter, Leaf, RemoveResult, RevIter};
+use super::leaf_node::LeafNode;
 use crate::Comparable;
 use crate::async_helper::TryWait;
-use crate::exit_guard::ExitGuard;
 
 /// [`Node`] is either [`Self::Internal`] or [`Self::Leaf`].
 pub enum Node<K, V> {
@@ -52,10 +52,10 @@ impl<K, V> Node<K, V> {
 
     /// Checks if the node has retired.
     #[inline]
-    pub(super) fn retired(&self) -> bool {
+    pub(super) fn is_retired(&self) -> bool {
         match &self {
-            Self::Internal(internal_node) => internal_node.retired(),
-            Self::Leaf(leaf_node) => leaf_node.retired(),
+            Self::Internal(internal_node) => internal_node.is_retired(),
+            Self::Leaf(leaf_node) => leaf_node.is_retired(),
         }
     }
 }
@@ -63,7 +63,7 @@ impl<K, V> Node<K, V> {
 impl<K, V> Node<K, V>
 where
     K: 'static + Clone + Ord,
-    V: 'static + Clone,
+    V: 'static,
 {
     /// Searches for an entry containing the specified key.
     #[inline]
@@ -91,30 +91,41 @@ where
         }
     }
 
-    /// Returns the minimum key-value pair.
-    ///
-    /// This method is not linearizable.
+    /// Returns the minimum key entry in the entire tree.
     #[inline]
-    pub(super) fn min<'g>(&self, guard: &'g Guard) -> Option<Scanner<'g, K, V>> {
+    pub(super) fn min<'g>(&self, guard: &'g Guard) -> Option<Iter<'g, K, V>> {
         match &self {
             Self::Internal(internal_node) => internal_node.min(guard),
             Self::Leaf(leaf_node) => leaf_node.min(guard),
         }
     }
 
-    /// Returns a [`Scanner`] pointing to an entry that is close enough to the entry with the
-    /// maximum key among those keys that are smaller than or equal to the given key.
-    ///
-    /// This method is not linearizable.
+    /// Returns the maximum key entry in the entire tree.
     #[inline]
-    pub(super) fn max_le_appr<'g, Q>(&self, key: &Q, guard: &'g Guard) -> Option<Scanner<'g, K, V>>
+    pub(super) fn max<'g>(&self, guard: &'g Guard) -> Option<RevIter<'g, K, V>> {
+        match &self {
+            Self::Internal(internal_node) => internal_node.max(guard),
+            Self::Leaf(leaf_node) => leaf_node.max(guard),
+        }
+    }
+
+    /// Returns a [`Iter`] pointing to an entry that is close enough to the specified key.
+    ///
+    /// If `LE == true`, the returned [`Iter`] does not contain any keys larger than the specified
+    /// key. If not, the returned [`Iter`] does not contain any keys smaller than the specified key.
+    #[inline]
+    pub(super) fn approximate<'g, Q, const LE: bool>(
+        &self,
+        key: &Q,
+        guard: &'g Guard,
+    ) -> Option<Iter<'g, K, V>>
     where
         K: 'g,
         Q: Comparable<K> + ?Sized,
     {
         match &self {
-            Self::Internal(internal_node) => internal_node.max_le_appr(key, guard),
-            Self::Leaf(leaf_node) => leaf_node.max_le_appr(key, guard),
+            Self::Internal(internal_node) => internal_node.approximate::<_, LE>(key, guard),
+            Self::Leaf(leaf_node) => leaf_node.approximate::<_, LE>(key, guard),
         }
     }
 
@@ -197,76 +208,28 @@ where
     pub(super) fn split_root(
         root_ptr: Ptr<Node<K, V>>,
         root: &AtomicShared<Node<K, V>>,
-        mut key: K,
-        mut val: V,
         guard: &Guard,
-    ) -> (K, V) {
-        let mut exit_guard = ExitGuard::new(true, |rollback| {
-            if rollback {
-                if let Some(old_root) = root_ptr.as_ref() {
-                    old_root.rollback(guard);
-                }
-            }
-        });
-
-        // The fact that the `TreeIndex` calls this function means the root is full and locked.
-        let mut new_root = Shared::new(Node::new_internal_node());
-        if let (Some(Self::Internal(internal_node)), Some(old_root)) =
-            (unsafe { new_root.get_mut() }, root_ptr.get_shared())
-        {
-            if root.load(Relaxed, guard) != root_ptr {
-                // The root has changed.
-                return (key, val);
-            }
-
-            internal_node.unbounded_child = AtomicShared::from(old_root);
-
-            // Now, the old root is connected to the new root, so the split operation will be rolled
-            // back in the `split_node` method if memory allocation fails.
-            *exit_guard = false;
-
-            let result = internal_node.split_node(
-                (key, val),
-                None,
-                root_ptr,
-                &internal_node.unbounded_child,
-                true,
-                &mut (),
-                guard,
-            );
-            let Ok(InsertResult::Retry(k, v)) = result else {
-                unreachable!()
+    ) {
+        if let Some(old_root) = root_ptr.get_shared() {
+            let new_root = if old_root.is_retired() {
+                Some(Shared::new(Node::new_leaf_node()))
+            } else {
+                let mut internal_node = Node::new_internal_node();
+                let Node::Internal(node) = &mut internal_node else {
+                    return;
+                };
+                node.unbounded_child
+                    .swap((Some(old_root), Tag::None), Relaxed);
+                Some(Shared::new(internal_node))
             };
-            key = k;
-            val = v;
-
             // Updates the pointer before unlocking the root.
-            match root.compare_exchange(
-                root_ptr,
-                (Some(new_root), Tag::None),
-                AcqRel,
-                Acquire,
-                guard,
-            ) {
-                Ok((old_root, new_root_ptr)) => {
-                    if let Some(Self::Internal(internal_node)) = new_root_ptr.as_ref() {
-                        internal_node.finish_split();
-                    }
-                    if let Some(old_root) = old_root {
-                        old_root.commit(guard);
-                    }
-                }
-                Err((new_root, _)) => {
-                    // The root has been changed.
-                    if let Some(Self::Internal(internal_node)) = new_root.as_deref() {
-                        internal_node.finish_split();
-                    }
-                    // The old root needs to rollback the split operation.
-                    *exit_guard = true;
-                }
+            if let Err((Some(new_root), _)) =
+                root.compare_exchange(root_ptr, (new_root, Tag::None), AcqRel, Acquire, guard)
+            {
+                let dropped = unsafe { new_root.drop_in_place() };
+                debug_assert!(dropped);
             }
         }
-        (key, val)
     }
 
     /// Cleans up or removes the current root node.
@@ -283,108 +246,47 @@ where
     ) -> bool {
         let mut root_ptr = root.load(Acquire, guard);
         while let Some(root_ref) = root_ptr.as_ref() {
-            let mut internal_node_locker = None;
-            let mut leaf_node_locker = None;
-            match root_ref {
-                Self::Internal(internal_node) => {
-                    if !internal_node.retired() && !internal_node.children.is_empty() {
-                        // The internal node is still usable.
-                        break;
-                    } else if let Some(locker) = internal_node::Locker::try_lock(internal_node) {
-                        internal_node_locker.replace(locker);
-                    } else {
-                        async_wait.try_wait(&internal_node.lock);
-                    }
+            if root_ref.is_retired() {
+                if let Err((_, new_root_ptr)) =
+                    root.compare_exchange(root_ptr, (None, Tag::None), AcqRel, Acquire, guard)
+                {
+                    root_ptr = new_root_ptr;
+                    continue;
                 }
-                Self::Leaf(leaf_node) => {
-                    if !leaf_node.retired() {
-                        // The leaf node is still usable.
-                        break;
-                    } else if let Some(locker) = leaf_node::Locker::try_lock(leaf_node) {
-                        leaf_node_locker.replace(locker);
-                    } else {
-                        async_wait.try_wait(&leaf_node.lock);
-                    }
-                }
+                // The entire tree was truncated.
+                break;
             }
 
-            if internal_node_locker.is_none() && leaf_node_locker.is_none() {
-                // The root node is locked by another thread.
-                return false;
-            }
-
-            let new_root = match root_ref {
-                Node::Internal(internal_node) => {
-                    if internal_node.retired() {
-                        // The internal node is empty, therefore the entire tree can be emptied.
-                        None
-                    } else if internal_node.children.is_empty() {
-                        // Replace the root with the unbounded child.
-                        internal_node.unbounded_child.get_shared(Acquire, guard)
-                    } else {
-                        // The internal node is not empty.
-                        break;
-                    }
-                }
-                Node::Leaf(leaf_node) => {
-                    if leaf_node.retired() {
-                        // The leaf node is empty, therefore the entire tree can be emptied.
-                        None
-                    } else {
-                        // The leaf node is not empty.
-                        break;
-                    }
-                }
+            // Try to lower the tree.
+            let Self::Internal(internal_node) = root_ref else {
+                break;
             };
-
-            match root.compare_exchange(root_ptr, (new_root, Tag::None), AcqRel, Acquire, guard) {
-                Ok((_, new_root_ptr)) => {
-                    root_ptr = new_root_ptr;
-                    if let Some(internal_node_locker) = internal_node_locker {
-                        internal_node_locker.unlock_retire();
+            if let Some(locker) = InternalNodeLocker::try_lock(internal_node) {
+                let new_root = if internal_node.children.is_empty() {
+                    // Replace the root with the unbounded child.
+                    internal_node.unbounded_child.get_shared(Acquire, guard)
+                } else {
+                    // The internal node is not empty.
+                    break;
+                };
+                match root.compare_exchange(root_ptr, (new_root, Tag::None), AcqRel, Acquire, guard)
+                {
+                    Ok((_, new_root_ptr)) => {
+                        locker.unlock_retire();
+                        root_ptr = new_root_ptr;
+                    }
+                    Err((_, new_root_ptr)) => {
+                        // The root node has been changed.
+                        root_ptr = new_root_ptr;
                     }
                 }
-                Err((_, new_root_ptr)) => {
-                    // The root node has been changed.
-                    root_ptr = new_root_ptr;
-                }
+            } else {
+                async_wait.try_wait(&internal_node.lock);
+                return false;
             }
         }
 
         true
-    }
-
-    /// Commits an ongoing structural change.
-    #[inline]
-    pub(super) fn commit(&self, guard: &Guard) {
-        match &self {
-            Self::Internal(internal_node) => internal_node.commit(guard),
-            Self::Leaf(leaf_node) => leaf_node.commit(guard),
-        }
-    }
-
-    /// Rolls back an ongoing structural change.
-    #[inline]
-    pub(super) fn rollback(&self, guard: &Guard) {
-        match &self {
-            Self::Internal(internal_node) => internal_node.rollback(guard),
-            Self::Leaf(leaf_node) => leaf_node.rollback(guard),
-        }
-    }
-
-    /// Cleans up logically deleted [`LeafNode`] instances in the linked list.
-    ///
-    /// Returns `false` if the target leaf node does not exist in the subtree.
-    #[inline]
-    pub(super) fn cleanup_link<'g, Q>(&self, key: &Q, traverse_max: bool, guard: &'g Guard) -> bool
-    where
-        K: 'g,
-        Q: Comparable<K> + ?Sized,
-    {
-        match &self {
-            Self::Internal(internal_node) => internal_node.cleanup_link(key, traverse_max, guard),
-            Self::Leaf(leaf_node) => leaf_node.cleanup_link(key, traverse_max, guard),
-        }
     }
 }
 

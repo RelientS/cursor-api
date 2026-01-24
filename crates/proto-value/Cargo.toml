@@ -18,12 +18,12 @@ byte_str = { version = "0.1.0", path = "../byte_str", default-features = false, 
 bytes = { version = "1.11.0", default-features = false, optional = true }
 indexmap = { version = "2.12.1", default-features = false, optional = true }
 itoa = { version = "1.0.17", optional = true }
-serde = { version = "1.0.228", default-features = false, optional = true }
+serde_core = { version = "1.0", default-features = false, optional = true }
 
 [features]
 default = ["bytes", "byte_str"]
 alloc = []
-serde = ["dep:serde", "dep:base64-simd", "dep:itoa"]
+serde = ["dep:serde_core", "dep:base64-simd", "dep:itoa"]
 std = ["alloc"]
 indexmap = ["dep:indexmap"]
 bytes = ["dep:bytes"]

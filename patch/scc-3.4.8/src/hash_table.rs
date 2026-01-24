@@ -43,6 +43,7 @@ where
     fn bucket_array_var(&self) -> &AtomicShared<BucketArray<K, V, L, TYPE>>;
 
     /// Returns a reference to the current [`BucketArray`].
+    #[inline]
     fn bucket_array<'g>(&self, guard: &'g Guard) -> Option<&'g BucketArray<K, V, L, TYPE>> {
         unsafe {
             self.bucket_array_var()
@@ -59,15 +60,12 @@ where
 
     /// Calculates the bucket index from the supplied key.
     #[inline]
-    fn calculate_bucket_index<Q>(&self, key: &Q) -> usize
-    where
-        Q: Equivalent<K> + Hash + ?Sized,
-    {
+    fn calculate_bucket_index(&self, hash: u64) -> usize {
         unsafe {
             self.bucket_array_var()
                 .load(Acquire, &Guard::new())
                 .as_ref_unchecked()
-                .map_or(0, |a| a.bucket_index(self.hash(key)))
+                .map_or(0, |a| a.bucket_index(hash))
         }
     }
 
@@ -75,6 +73,7 @@ where
     fn minimum_capacity_var(&self) -> &AtomicUsize;
 
     /// Returns the current minimum allowed capacity.
+    #[inline]
     fn minimum_capacity(&self) -> usize {
         self.minimum_capacity_var().load(Relaxed) & (!RESIZING)
     }
@@ -82,6 +81,7 @@ where
     /// Returns the maximum capacity.
     ///
     /// The maximum capacity must be a power of `2`.
+    #[inline]
     fn maximum_capacity(&self) -> usize {
         MAXIMUM_CAPACITY_LIMIT
     }
@@ -613,7 +613,7 @@ where
 
     /// Iterates over all the buckets in the [`HashTable`].
     ///
-    /// This method stops iterating when the closure returns `true`.
+    /// This method stops iterating when the closure returns `false`.
     #[inline]
     async fn for_each_writer_async<F>(
         &self,
@@ -665,8 +665,7 @@ where
                         bucket_index,
                         bucket_array: into_non_null(current_array),
                     };
-                    let stop = f(locked_bucket, &mut removed);
-                    if stop {
+                    if !f(locked_bucket, &mut removed) {
                         // Stop iterating over buckets.
                         start_index = current_array_len;
                         break;
@@ -695,7 +694,7 @@ where
 
     /// Iterates over all the buckets in the [`HashTable`].
     ///
-    /// This methods stops iterating when the closure returns `true`.
+    /// This methods stops iterating when the closure returns `false`.
     #[inline]
     fn for_each_writer_sync<F>(
         &self,
@@ -734,8 +733,7 @@ where
                         bucket_index,
                         bucket_array: into_non_null(current_array),
                     };
-                    let stop = f(locked_bucket, &mut removed);
-                    if stop {
+                    if !f(locked_bucket, &mut removed) {
                         // Stop iterating over buckets.
                         start_index = current_array_len;
                         break;
@@ -1020,7 +1018,7 @@ where
         let mut hash_data = [0_u64; BUCKET_LEN];
 
         // Collect data for relocation.
-        while entry_ptr.move_to_next(old_writer) {
+        while entry_ptr.find_next(old_writer) {
             let (offset, hash) = if old_array.len() >= current_array.len() {
                 (0, u64::from(entry_ptr.partial_hash(&**old_writer)))
             } else {
@@ -1069,7 +1067,7 @@ where
         // Relocate entries; it is infallible.
         entry_ptr = EntryPtr::null();
         position = 0;
-        while entry_ptr.move_to_next(old_writer) {
+        while entry_ptr.find_next(old_writer) {
             let hash = if old_array.len() >= current_array.len() {
                 u64::from(entry_ptr.partial_hash(&**old_writer))
             } else if position == BUCKET_LEN {
@@ -1103,18 +1101,20 @@ where
         let rehashing_metadata = old_array.rehashing_metadata();
         let mut current = rehashing_metadata.load(Relaxed);
         loop {
-            if current >= old_array.len() || (current & (BUCKET_LEN - 1)) == BUCKET_LEN - 1 {
-                // Only `BUCKET_LEN` threads are allowed to rehash a `Bucket` at a moment.
+            if current >= old_array.len() || (current & (BUCKET_LEN * 2 - 1)) == BUCKET_LEN * 2 - 1
+            {
+                // Only `BUCKET_LEN * 2` concurrent threads are allowed to rehash `BUCKET_LEN * 2`
+                // buckets.
                 return None;
             }
             match rehashing_metadata.compare_exchange_weak(
                 current,
-                current + BUCKET_LEN + 1,
+                current + BUCKET_LEN * 2 + 1,
                 Acquire,
                 Relaxed,
             ) {
                 Ok(_) => {
-                    current &= !(BUCKET_LEN - 1);
+                    current &= !(BUCKET_LEN * 2 - 1);
                     return Some(current);
                 }
                 Err(result) => current = result,
@@ -1133,7 +1133,7 @@ where
         if success {
             // Keep the index as it is.
             let metadata = rehashing_metadata.fetch_sub(1, Release) - 1;
-            (metadata & (BUCKET_LEN - 1) == 0) && metadata >= old_array.len()
+            (metadata & (BUCKET_LEN * 2 - 1) == 0) && metadata >= old_array.len()
         } else {
             // On failure, `rehashing` reverts to its previous state.
             let mut current = rehashing_metadata.load(Relaxed);
@@ -1141,7 +1141,7 @@ where
                 let new = if current <= prev {
                     current - 1
                 } else {
-                    let refs = current & (BUCKET_LEN - 1);
+                    let refs = current & (BUCKET_LEN * 2 - 1);
                     prev | (refs - 1)
                 };
                 match rehashing_metadata.compare_exchange_weak(current, new, Release, Relaxed) {
@@ -1172,7 +1172,7 @@ where
                 });
 
                 for bucket_index in
-                    rehashing_guard.1..(rehashing_guard.1 + BUCKET_LEN).min(old_array.len())
+                    rehashing_guard.1..(rehashing_guard.1 + BUCKET_LEN * 2).min(old_array.len())
                 {
                     let old_bucket = rehashing_guard.0.bucket(bucket_index);
                     let writer = Writer::lock_async(old_bucket, async_guard).await;
@@ -1218,7 +1218,7 @@ where
                 });
 
                 for bucket_index in
-                    rehashing_guard.1..(rehashing_guard.1 + BUCKET_LEN).min(old_array.len())
+                    rehashing_guard.1..(rehashing_guard.1 + BUCKET_LEN * 2).min(old_array.len())
                 {
                     let old_bucket = rehashing_guard.0.bucket(bucket_index);
                     let writer = if TRY_LOCK {
@@ -1321,28 +1321,8 @@ where
         } else if current_array.has_linked_array() {
             // Cannot resize with a bucket array linked to the current bucket array.
             return;
-        }
-
-        if self
-            .minimum_capacity_var()
-            .fetch_update(AcqRel, Acquire, |lock_state| {
-                if lock_state >= RESIZING {
-                    None
-                } else {
-                    Some(lock_state + RESIZING)
-                }
-            })
-            .is_err()
-        {
-            // The bucket array is being replaced with a new one.
-            return;
-        }
-        let _lock_guard = ExitGuard::new((), |()| {
-            self.minimum_capacity_var().fetch_sub(RESIZING, Release);
-        });
-
-        if self.bucket_array_var().load(Acquire, guard) != current_array_ptr {
-            // Resized in the meantime.
+        } else if self.minimum_capacity_var().load(Relaxed) >= RESIZING {
+            // The table is being resized.
             return;
         }
 
@@ -1382,6 +1362,29 @@ where
         let try_drop_table = estimated_num_entries == 0 && minimum_capacity == 0;
         if !try_resize && !try_drop_table {
             // Nothing to do.
+            return;
+        }
+
+        if self
+            .minimum_capacity_var()
+            .fetch_update(AcqRel, Acquire, |lock_state| {
+                if lock_state >= RESIZING {
+                    None
+                } else {
+                    Some(lock_state + RESIZING)
+                }
+            })
+            .is_err()
+        {
+            // The bucket array is being replaced with a new one.
+            return;
+        }
+        let _lock_guard = ExitGuard::new((), |()| {
+            self.minimum_capacity_var().fetch_sub(RESIZING, Release);
+        });
+
+        if self.bucket_array_var().load(Acquire, guard) != current_array_ptr {
+            // Resized in the meantime.
             return;
         }
 
@@ -1448,7 +1451,6 @@ pub(super) const MAXIMUM_CAPACITY_LIMIT: usize = 1_usize << (usize::BITS - 2);
 pub(super) const RESIZING: usize = 1_usize << (usize::BITS - 1);
 
 /// [`LockedBucket`] has exclusive access to a [`Bucket`].
-#[derive(Debug)]
 pub(crate) struct LockedBucket<K, V, L: LruList, const TYPE: char> {
     /// Holds an exclusive lock on the [`Bucket`].
     pub writer: Writer<K, V, L, TYPE>,
@@ -1573,7 +1575,7 @@ impl<K: Eq + Hash, V, L: LruList, const TYPE: char> LockedBucket<K, V, L, TYPE> 
     where
         H: BuildHasher,
     {
-        if entry_ptr.move_to_next(&self.writer) {
+        if entry_ptr.find_next(&self.writer) {
             return Some(self);
         }
 
@@ -1594,11 +1596,11 @@ impl<K: Eq + Hash, V, L: LruList, const TYPE: char> LockedBucket<K, V, L, TYPE> 
         hash_table
             .for_each_writer_async(next_index, len, |locked_bucket, _| {
                 *entry_ptr = EntryPtr::null();
-                if entry_ptr.move_to_next(&locked_bucket.writer) {
+                if entry_ptr.find_next(&locked_bucket.writer) {
                     next_entry = Some(locked_bucket);
-                    return true;
+                    return false;
                 }
-                false
+                true
             })
             .await;
 
@@ -1615,7 +1617,7 @@ impl<K: Eq + Hash, V, L: LruList, const TYPE: char> LockedBucket<K, V, L, TYPE> 
     where
         H: BuildHasher,
     {
-        if entry_ptr.move_to_next(&self.writer) {
+        if entry_ptr.find_next(&self.writer) {
             return Some(self);
         }
 
@@ -1635,11 +1637,11 @@ impl<K: Eq + Hash, V, L: LruList, const TYPE: char> LockedBucket<K, V, L, TYPE> 
         let mut next_entry = None;
         hash_table.for_each_writer_sync(next_index, len, &Guard::new(), |locked_bucket, _| {
             *entry_ptr = EntryPtr::null();
-            if entry_ptr.move_to_next(&locked_bucket.writer) {
+            if entry_ptr.find_next(&locked_bucket.writer) {
                 next_entry = Some(locked_bucket);
-                return true;
+                return false;
             }
-            false
+            true
         });
 
         next_entry
@@ -1679,6 +1681,7 @@ const fn from_index_to_range(from_len: usize, to_len: usize, from_index: usize) 
 }
 
 /// Turns a reference into a [`NonNull`] pointer.
+#[inline]
 const fn into_non_null<T: Sized>(t: &T) -> NonNull<T> {
     unsafe { NonNull::new_unchecked(from_ref(t).cast_mut()) }
 }

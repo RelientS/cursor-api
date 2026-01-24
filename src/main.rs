@@ -1,7 +1,6 @@
 #![allow(internal_features)]
 #![feature(
     addr_parse_ascii,
-    cold_path,
     hasher_prefixfree_extras,
     const_trait_impl,
     const_default,
@@ -15,7 +14,8 @@
     fn_traits,
     ptr_metadata,
     maybe_uninit_as_bytes,
-    cfg_select
+    never_type,
+    adt_const_params
 )]
 #![allow(clippy::redundant_static_lifetimes, clippy::enum_variant_names, clippy::let_and_return)]
 
@@ -108,11 +108,10 @@ fn main() {
             }
         } else {
             println!("数据兼容版本标识不存在，当前需要: v{MIN_COMPAT_VERSION}");
-            if let Ok(mut f) = std::fs::File::create(&path) {
-                if let Err(e) = MIN_COMPAT_VERSION.write_to(&mut f) {
+            if let Ok(mut f) = std::fs::File::create(&path) 
+                && let Err(e) = MIN_COMPAT_VERSION.write_to(&mut f) {
                     eprintln!("{e}");
                 }
-            }
         }
     }
 

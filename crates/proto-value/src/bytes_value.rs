@@ -129,8 +129,8 @@ mod serde_impls {
     use core::fmt;
 
     use base64_simd::{forgiving_decode_to_vec, STANDARD};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use serde::de::{self, Unexpected, Visitor};
+    use serde_core::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_core::de::{self, Unexpected, Visitor};
 
     use super::Bytes;
 

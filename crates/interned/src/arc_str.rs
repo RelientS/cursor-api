@@ -58,7 +58,7 @@ use scc::{Equivalent, HashMap};
 /// # 设计目标
 ///
 /// - **内存去重**：相同内容的字符串共享同一内存地址
-/// - **零拷贝克隆**：clone() 只涉及原子递增操作
+/// - **零拷贝克隆**：`clone()` 只涉及原子递增操作
 /// - **线程安全**：支持多线程环境下的安全使用
 /// - **高性能查找**：使用预计算哈希值优化池查找
 ///
@@ -115,8 +115,8 @@ impl ArcStr {
     ///
     /// # 性能特征
     ///
-    /// - **池命中**：O(1) HashMap 查找 + 原子递增
-    /// - **池缺失**：O(1) 内存分配 + O(1) HashMap 插入
+    /// - **池命中**：O(1) `HashMap` 查找 + 原子递增
+    /// - **池缺失**：O(1) 内存分配 + O(1) `HashMap` 插入
     /// - **哈希计算**：使用 ahash 的高性能哈希算法
     ///
     /// # Examples
@@ -150,9 +150,8 @@ impl ArcStr {
         // 进入这里说明需要创建新的字符串实例
         let pool = ARC_STR_POOL.get();
 
-        use scc::hash_map::RawEntry;
         match pool.raw_entry().from_key_hashed_nocheck_sync(hash, string) {
-            RawEntry::Occupied(entry) => {
+            scc::hash_map::RawEntry::Occupied(entry) => {
                 // 双重检查：在获取写锁的过程中，其他线程可能已经创建了相同的字符串
                 let ptr = entry.key().0;
 
@@ -162,13 +161,13 @@ impl ArcStr {
 
                 Self { ptr, _marker: PhantomData }
             }
-            RawEntry::Vacant(entry) => {
+            scc::hash_map::RawEntry::Vacant(entry) => {
                 // 确认需要创建新实例：分配内存并初始化
                 let layout = ArcStrInner::layout_for_string(string.len());
 
                 // SAFETY: layout_for_string 确保布局有效且大小合理
                 let ptr = unsafe {
-                    let alloc = alloc::alloc::alloc(layout) as *mut ArcStrInner;
+                    let alloc: *mut ArcStrInner = alloc::alloc::alloc(layout).cast();
 
                     if alloc.is_null() {
                         hint::cold_path();
@@ -197,7 +196,8 @@ impl ArcStr {
     ///
     /// 这是一个 `const fn`，在编译时就能确定偏移量，
     /// 运行时仅需要一次内存解引用。
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn as_str(&self) -> &str {
         // SAFETY: ptr 在 ArcStr 生命周期内始终指向有效的 ArcStrInner，
         // 且字符串数据保证是有效的 UTF-8
@@ -207,28 +207,32 @@ impl ArcStr {
     /// 获取字符串的字节切片
     ///
     /// 提供对底层字节数据的直接访问。
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn as_bytes(&self) -> &[u8] {
         // SAFETY: ptr 始终指向有效的 ArcStrInner
         unsafe { self.ptr.as_ref().as_bytes() }
     }
 
     /// 获取字符串长度（字节数）
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn len(&self) -> usize {
         // SAFETY: ptr 始终指向有效的 ArcStrInner
         unsafe { self.ptr.as_ref().string_len }
     }
 
     /// 检查字符串是否为空
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn is_empty(&self) -> bool { self.len() == 0 }
 
     /// 获取当前引用计数
     ///
     /// 注意：由于并发访问，返回的值可能在返回后立即发生变化。
     /// 此方法主要用于调试和测试。
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub fn ref_count(&self) -> usize {
         // SAFETY: ptr 始终指向有效的 ArcStrInner
         unsafe { self.ptr.as_ref().strong_count() }
@@ -237,7 +241,8 @@ impl ArcStr {
     /// 获取字符串数据的内存地址（用于调试和测试）
     ///
     /// 返回字符串内容的起始地址，可用于验证字符串是否共享内存。
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn as_ptr(&self) -> *const u8 {
         // SAFETY: ptr 始终指向有效的 ArcStrInner
         unsafe { self.ptr.as_ref().string_ptr() }
@@ -257,7 +262,8 @@ impl ArcStr {
     /// # 返回值
     ///
     /// 如果找到匹配的字符串，返回增加引用计数后的 `ArcStr`；否则返回 `None`。
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     fn try_find_existing(pool: &PtrMap, hash: u64, string: &str) -> Option<Self> {
         // 使用 hashbrown 的 from_key_hashed_nocheck API
         // 这利用了 Equivalent trait 来进行高效比较
@@ -349,10 +355,10 @@ impl Drop for ArcStr {
 //                          第二层：标准库集成
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// # 基础 Trait 实现
-///
-/// 这些实现确保 `ArcStr` 能够与 Rust 的标准库类型无缝集成，
-/// 提供符合直觉的比较、格式化和访问接口。
+// # 基础 Trait 实现
+//
+// 这些实现确保 `ArcStr` 能够与 Rust 的标准库类型无缝集成，
+// 提供符合直觉的比较、格式化和访问接口。
 
 impl PartialEq for ArcStr {
     /// 基于指针的快速相等比较
@@ -423,10 +429,10 @@ impl const core::ops::Deref for ArcStr {
     fn deref(&self) -> &Self::Target { self.as_str() }
 }
 
-/// # 与其他字符串类型的互操作性
-///
-/// 这些实现使得 `ArcStr` 可以与 Rust 生态系统中的各种字符串类型
-/// 进行直接比较，提供良好的开发体验。
+// # 与其他字符串类型的互操作性
+//
+// 这些实现使得 `ArcStr` 可以与 Rust 生态系统中的各种字符串类型
+// 进行直接比较，提供良好的开发体验。
 
 impl const PartialEq<str> for ArcStr {
     #[inline]
@@ -470,10 +476,10 @@ impl PartialOrd<String> for ArcStr {
     }
 }
 
-/// # 类型转换实现
-///
-/// 提供从各种字符串类型到 `ArcStr` 的便捷转换，
-/// 以及从 `ArcStr` 到其他类型的转换。
+// # 类型转换实现
+//
+// 提供从各种字符串类型到 `ArcStr` 的便捷转换，
+// 以及从 `ArcStr` 到其他类型的转换。
 
 impl<'a> From<&'a str> for ArcStr {
     #[inline]
@@ -523,8 +529,8 @@ impl str::FromStr for ArcStr {
 /// 序列化时输出字符串内容，反序列化时重新建立池化引用。
 #[cfg(feature = "serde")]
 mod serde_impls {
-    use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use super::ArcStr;
+    use serde_core::{Deserialize, Deserializer, Serialize, Serializer};
 
     impl Serialize for ArcStr {
         #[inline]
@@ -547,10 +553,10 @@ mod serde_impls {
 //                          第三层：核心实现机制
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// # 内存布局与数据结构设计
-///
-/// 这个模块包含了 `ArcStr` 的底层数据结构定义和内存布局管理。
-/// 理解这部分有助于深入了解性能优化的原理。
+// # 内存布局与数据结构设计
+//
+// 这个模块包含了 `ArcStr` 的底层数据结构定义和内存布局管理。
+// 理解这部分有助于深入了解性能优化的原理。
 
 /// 字符串内容的内部表示（DST 头部）
 ///
@@ -593,15 +599,15 @@ struct ArcStrInner {
     /// 预计算的内容哈希值
     ///
     /// 这个哈希值在多个场景中被复用：
-    /// - 全局池的HashMap键
-    /// - Drop时的快速查找
+    /// - 全局池的 `HashMap` 键
+    /// - `Drop` 时的快速查找
     /// - 避免重复哈希计算的性能优化
     hash: u64,
 
     /// 原子引用计数
     ///
     /// 使用原生原子类型确保最佳性能。
-    /// 计数范围：[1, isize::MAX]，超出时触发abort。
+    /// 计数范围：[1, `isize::MAX`]，超出时触发abort。
     count: AtomicUsize,
 
     /// 字符串的字节长度（UTF-8编码）
@@ -627,10 +633,11 @@ impl ArcStrInner {
     /// - `self` 必须是指向有效 `ArcStrInner` 的指针
     /// - 必须确保字符串数据已经被正确初始化
     /// - 调用者负责确保返回的指针在使用期间保持有效
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     const unsafe fn string_ptr(&self) -> *const u8 {
         // SAFETY: repr(C) 保证字符串数据位于结构体末尾的固定偏移处
-        (self as *const Self).add(1).cast()
+        core::ptr::from_ref(self).add(1).cast()
     }
 
     /// 获取字符串的字节切片
@@ -641,7 +648,8 @@ impl ArcStrInner {
     /// - 字符串数据必须已经被正确初始化
     /// - `string_len` 必须准确反映实际字符串长度
     /// - 字符串数据必须在返回的切片生命周期内保持有效
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     const unsafe fn as_bytes(&self) -> &[u8] {
         let ptr = self.string_ptr();
         // SAFETY: 调用者保证 ptr 指向有效的 string_len 字节数据
@@ -656,7 +664,8 @@ impl ArcStrInner {
     /// - 字符串数据必须是有效的 UTF-8 编码
     /// - `string_len` 必须准确反映实际字符串长度
     /// - 字符串数据必须在返回的切片生命周期内保持有效
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     const unsafe fn as_str(&self) -> &str {
         // SAFETY: 调用者保证字符串数据是有效的 UTF-8
         core::str::from_utf8_unchecked(self.as_bytes())
@@ -729,7 +738,7 @@ impl ArcStrInner {
         // - string_ptr() 计算出的地址位于已分配内存范围内
         // - string.len() 与分配时的长度一致
         // - string.as_ptr() 指向有效的 UTF-8 数据
-        let string_ptr = (*inner).string_ptr() as *mut u8;
+        let string_ptr = (*inner).string_ptr().cast_mut();
         core::ptr::copy_nonoverlapping(string.as_ptr(), string_ptr, string.len());
     }
 
@@ -783,14 +792,14 @@ impl ArcStrInner {
     fn strong_count(&self) -> usize { self.count.load(Relaxed) }
 }
 
-/// # 全局字符串池的设计与实现
-///
-/// 全局池是整个系统的核心，负责去重和生命周期管理。
+// # 全局字符串池的设计与实现
+//
+// 全局池是整个系统的核心，负责去重和生命周期管理。
 
 /// 线程安全的内部指针包装
 ///
 /// 这个类型解决了在 `HashMap` 中存储 `NonNull<ArcStrInner>` 的问题：
-/// - 提供必要的 trait 实现（Hash, PartialEq, Send, Sync）
+/// - 提供必要的 trait 实现（ `Hash`, `PartialEq`, `Send`, `Sync` ）
 /// - 封装指针的线程安全语义
 /// - 支持基于内容的查找（通过 Equivalent trait）
 ///
@@ -811,7 +820,7 @@ unsafe impl Sync for ThreadSafePtr {}
 impl const core::ops::Deref for ThreadSafePtr {
     type Target = NonNull<ArcStrInner>;
 
-    #[inline(always)]
+    #[inline]
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
@@ -826,7 +835,7 @@ impl Hash for ThreadSafePtr {
         // SAFETY: ThreadSafePtr 保证指针在池生命周期内始终有效
         unsafe {
             let inner = self.0.as_ref();
-            state.write_u64(inner.hash)
+            state.write_u64(inner.hash);
         }
     }
 }
@@ -871,11 +880,11 @@ impl Equivalent<ThreadSafePtr> for str {
     }
 }
 
-/// # 哈希算法选择与池类型定义
+// # 哈希算法选择与池类型定义
 
 /// 透传哈希器，用于全局池内部
 ///
-/// 由于我们在 `ArcStrInner` 中预存了哈希值，池内部的 HashMap
+/// 由于我们在 `ArcStrInner` 中预存了哈希值，池内部的 `HashMap`
 /// 不需要重新计算哈希。`IdentityHasher` 直接透传 u64 值。
 ///
 /// # 工作原理
@@ -883,7 +892,7 @@ impl Equivalent<ThreadSafePtr> for str {
 /// 1. `ThreadSafePtr::hash()` 调用 `hasher.write_u64(stored_hash)`
 /// 2. `IdentityHasher::write_u64()` 直接存储这个值
 /// 3. `IdentityHasher::finish()` 返回存储的值
-/// 4. HashMap 使用这个哈希值进行桶分配和查找
+/// 4. `HashMap` 使用这个哈希值进行桶分配和查找
 ///
 /// 这避免了重复的哈希计算，将池操作的哈希开销降到最低。
 #[derive(Default, Clone, Copy)]
@@ -894,10 +903,10 @@ impl Hasher for IdentityHasher {
         unreachable!("IdentityHasher usage error");
     }
 
-    #[inline(always)]
-    fn write_u64(&mut self, id: u64) { self.0 = id; }
+    #[inline]
+    fn write_u64(&mut self, id: u64) { self.0 = id }
 
-    #[inline(always)]
+    #[inline]
     fn finish(&self) -> u64 { self.0 }
 }
 
@@ -912,7 +921,7 @@ type PtrMap = HashMap<ThreadSafePtr, (), PoolHasher>;
 ///
 /// # 为什么使用 ahash？
 ///
-/// - 高性能：比标准库的 DefaultHasher 更快
+/// - 高性能：比标准库的 `DefaultHasher` 更快
 /// - 安全性：抗哈希洪水攻击
 /// - 质量：分布均匀，减少哈希冲突
 static CONTENT_HASHER: ManuallyInit<ahash::RandomState> = ManuallyInit::new();
@@ -949,6 +958,8 @@ static ARC_STR_POOL: ManuallyInit<PtrMap> = ManuallyInit::new();
 /// 虽然这个函数本身不是线程安全的，但它应该在单线程环境下
 /// （如 main 函数开始或静态初始化时）被调用一次。
 #[inline(always)]
+// 只调用一次
+#[allow(clippy::inline_always)]
 pub(crate) fn __init() {
     CONTENT_HASHER.init(ahash::RandomState::new());
     ARC_STR_POOL.init(PtrMap::with_capacity_and_hasher(128, PoolHasher::default()));

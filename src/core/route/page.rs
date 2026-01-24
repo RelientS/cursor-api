@@ -1,4 +1,7 @@
-use crate::app::constant::header::{HEADER_VALUE_TEXT_HTML_UTF8, HEADER_VALUE_TEXT_PLAIN_UTF8};
+use crate::{
+    app::constant::header::{HEADER_VALUE_TEXT_HTML_UTF8, HEADER_VALUE_TEXT_PLAIN_UTF8},
+    common::platform::CONFIG_EXAMPLE,
+};
 use axum::{body::Body, http::header::CONTENT_TYPE, response::Response};
 
 // const MAX_FILE_SIZE_BYTES: u64 = 4_000_000_000;
@@ -15,7 +18,7 @@ pub async fn handle_config_example() -> Response {
     __unwrap!(
         Response::builder()
             .header(CONTENT_TYPE, HEADER_VALUE_TEXT_PLAIN_UTF8)
-            .body(Body::from(include_str!("../../../config.example.toml")))
+            .body(Body::from(CONFIG_EXAMPLE))
     )
 }
 

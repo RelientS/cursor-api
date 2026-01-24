@@ -1,6 +1,5 @@
-use manually_init::ManuallyInit;
-
 use crate::common::utils::parse_from_env;
+use manually_init::ManuallyInit;
 
 pub static TZ: ManuallyInit<chrono_tz::Tz> = ManuallyInit::new();
 
@@ -48,19 +47,13 @@ impl DateTime {
 
     /// 获取当前时刻的 UTC 时间。
     #[inline(always)]
-    pub fn utc_now() -> chrono::DateTime<chrono::Utc> {
-        now_naive().and_utc()
-    }
+    pub fn utc_now() -> chrono::DateTime<chrono::Utc> { now_naive().and_utc() }
 
     #[inline(always)]
-    pub fn naive_now() -> chrono::NaiveDateTime {
-        now_naive()
-    }
+    pub fn naive_now() -> chrono::NaiveDateTime { now_naive() }
 
     #[inline(always)]
-    pub fn naive(&self) -> chrono::NaiveDateTime {
-        self.0.naive_utc()
-    }
+    pub fn naive(&self) -> chrono::NaiveDateTime { self.0.naive_utc() }
 
     #[inline(always)]
     pub fn from_naive(naive: &chrono::NaiveDateTime) -> Self {
@@ -73,23 +66,17 @@ impl ::core::ops::Deref for DateTime {
     type Target = chrono::DateTime<chrono_tz::Tz>;
 
     #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+    fn deref(&self) -> &Self::Target { &self.0 }
 }
 
 impl From<chrono::NaiveDateTime> for DateTime {
     #[inline]
-    fn from(naive: chrono::NaiveDateTime) -> Self {
-        Self::from_naive(&naive)
-    }
+    fn from(naive: chrono::NaiveDateTime) -> Self { Self::from_naive(&naive) }
 }
 
 impl From<DateTime> for chrono::NaiveDateTime {
     #[inline]
-    fn from(date_time: DateTime) -> Self {
-        date_time.naive()
-    }
+    fn from(date_time: DateTime) -> Self { date_time.naive() }
 }
 
 mod serde_impls {
@@ -98,9 +85,7 @@ mod serde_impls {
     impl ::serde::Serialize for DateTime {
         #[inline]
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: ::serde::Serializer,
-        {
+        where S: ::serde::Serializer {
             self.0.serialize(serializer)
         }
     }
@@ -108,11 +93,8 @@ mod serde_impls {
     impl<'de> ::serde::Deserialize<'de> for DateTime {
         #[inline]
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            deserializer
-                .deserialize_str(chrono::serde::DateTimeVisitor)
+        where D: ::serde::Deserializer<'de> {
+            chrono::DateTime::<chrono::FixedOffset>::deserialize(deserializer)
                 .map(|dt| Self(dt.with_timezone(&TZ)))
         }
     }
@@ -120,9 +102,7 @@ mod serde_impls {
 
 impl ::core::cmp::PartialEq<DateTime> for DateTime {
     #[inline]
-    fn eq(&self, other: &DateTime) -> bool {
-        self.0 == other.0
-    }
+    fn eq(&self, other: &DateTime) -> bool { self.0 == other.0 }
 }
 
 impl ::core::cmp::Eq for DateTime {}
@@ -136,7 +116,5 @@ impl ::core::cmp::PartialOrd<DateTime> for DateTime {
 
 impl ::core::cmp::Ord for DateTime {
     #[inline]
-    fn cmp(&self, other: &DateTime) -> ::core::cmp::Ordering {
-        self.0.cmp(&other.0)
-    }
+    fn cmp(&self, other: &DateTime) -> ::core::cmp::Ordering { self.0.cmp(&other.0) }
 }

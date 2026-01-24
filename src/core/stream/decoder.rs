@@ -243,7 +243,7 @@ impl StreamDecoder {
 
         let mut messages = Vec::with_capacity(count);
 
-        while let Some(raw_msg) = iter.next() {
+        for raw_msg in iter.by_ref() {
             if raw_msg.data.is_empty() {
                 #[cfg(test)]
                 messages.push(StreamMessage::ContentStart);
@@ -343,7 +343,7 @@ impl StreamDecoder {
 
     fn handle_text_message(msg_data: &[u8], ctx: &mut Context) -> Option<StreamMessage> {
         // let count = self.counter.fetch_add(1, Ordering::SeqCst);
-        if let Ok(wrapper) = StreamUnifiedChatResponseWithTools::decode(&*msg_data) {
+        if let Ok(wrapper) = StreamUnifiedChatResponseWithTools::decode(msg_data) {
             // crate::debug!("StreamUnifiedChatResponseWithTools [hex: {}]: {:#?}", hex::encode(msg_data), response);
             // crate::debug!("{count}: {response:?}");
             if let Some(response) = wrapper.response {

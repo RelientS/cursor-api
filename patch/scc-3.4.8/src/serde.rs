@@ -355,7 +355,7 @@ where
 }
 
 /// Helper type to allow `serde` to access [`TreeIndex`] entries.
-pub struct TreeIndexVisitor<K: 'static + Clone + Ord, V: 'static + Clone> {
+pub struct TreeIndexVisitor<K: 'static + Clone + Ord, V: 'static> {
     #[allow(clippy::type_complexity)]
     marker: PhantomData<fn() -> TreeIndex<K, V>>,
 }
@@ -363,7 +363,6 @@ pub struct TreeIndexVisitor<K: 'static + Clone + Ord, V: 'static + Clone> {
 impl<K, V> TreeIndexVisitor<K, V>
 where
     K: Clone + Ord,
-    V: Clone,
 {
     fn new() -> Self {
         TreeIndexVisitor {
@@ -375,7 +374,7 @@ where
 impl<'d, K, V> Visitor<'d> for TreeIndexVisitor<K, V>
 where
     K: 'static + Clone + Deserialize<'d> + Ord,
-    V: 'static + Clone + Deserialize<'d>,
+    V: 'static + Deserialize<'d>,
 {
     type Value = TreeIndex<K, V>;
 
@@ -398,7 +397,7 @@ where
 impl<'d, K, V> Deserialize<'d> for TreeIndex<K, V>
 where
     K: 'static + Clone + Deserialize<'d> + Ord,
-    V: 'static + Clone + Deserialize<'d>,
+    V: 'static + Deserialize<'d>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -411,7 +410,7 @@ where
 impl<K, V> Serialize for TreeIndex<K, V>
 where
     K: 'static + Clone + Ord + Serialize,
-    V: 'static + Clone + Serialize,
+    V: 'static + Serialize,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

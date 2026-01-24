@@ -43,8 +43,8 @@ fn insert_rev(c: &mut Criterion) {
     });
 }
 
-fn iter_with(c: &mut Criterion) {
-    c.bench_function("TreeIndex: iter_with", |b| {
+fn iter(c: &mut Criterion) {
+    c.bench_function("TreeIndex: iter", |b| {
         b.iter_custom(|iters| {
             let treeindex: TreeIndex<u64, u64> = TreeIndex::default();
             for i in 0..iters {
@@ -55,6 +55,25 @@ fn iter_with(c: &mut Criterion) {
             let iter = treeindex.iter(&guard);
             for e in iter {
                 assert_eq!(e.0, e.1);
+            }
+            start.elapsed()
+        })
+    });
+}
+
+fn range(c: &mut Criterion) {
+    c.bench_function("TreeIndex: range", |b| {
+        b.iter_custom(|iters| {
+            let treeindex: TreeIndex<u64, u64> = TreeIndex::default();
+            for i in 0..iters {
+                assert!(treeindex.insert_sync(i, i).is_ok());
+            }
+            let start = Instant::now();
+            let guard = Guard::new();
+            for s in 0..iters {
+                let range = s..iters;
+                let mut iter = treeindex.range(range.clone(), &guard);
+                assert_eq!(range.is_empty(), iter.next().is_none());
             }
             start.elapsed()
         })
@@ -83,7 +102,8 @@ criterion_group!(
     insert_async,
     insert_sync,
     insert_rev,
-    iter_with,
+    iter,
+    range,
     peek
 );
 criterion_main!(tree_index);

@@ -98,7 +98,7 @@ pub(super) trait Adapter: Sized + 'static {
         match res {
             Ok((image_data, dimension)) => {
                 images.push(ImageProto {
-                    data: image_data.into(),
+                    data: image_data,
                     dimension,
                     uuid: base_uuid.add_and_to_string(),
                     // task_specific_description: None,

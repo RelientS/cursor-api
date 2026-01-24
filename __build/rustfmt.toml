@@ -1,0 +1,8 @@
+style_edition = "2024"
+use_small_heuristics = "Max"
+merge_derives = false
+group_imports = "One"
+imports_granularity = "Module"
+use_field_init_shorthand = true
+tab_spaces = 2
+where_single_line = true

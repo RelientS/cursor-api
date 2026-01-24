@@ -983,11 +983,11 @@ mod hashmap {
             let task = tokio::task::spawn(async move {
                 // test insert
                 barrier_clone.wait().await;
-                let mut scanned = 0;
+                let mut iterated = 0;
                 let mut checker = BTreeSet::new();
                 let mut max = inserted_clone.load(Acquire);
                 hashmap_clone.retain_sync(|k, _| {
-                    scanned += 1;
+                    iterated += 1;
                     checker.insert(*k);
                     true
                 });
@@ -996,12 +996,12 @@ mod hashmap {
                 }
 
                 barrier_clone.wait().await;
-                scanned = 0;
+                iterated = 0;
                 checker = BTreeSet::new();
                 max = inserted_clone.load(Acquire);
                 hashmap_clone
                     .retain_async(|k, _| {
-                        scanned += 1;
+                        iterated += 1;
                         checker.insert(*k);
                         true
                     })
@@ -1012,20 +1012,20 @@ mod hashmap {
 
                 // test remove
                 barrier_clone.wait().await;
-                scanned = 0;
+                iterated = 0;
                 max = removed_clone.load(Acquire);
                 hashmap_clone.retain_sync(|k, _| {
-                    scanned += 1;
+                    iterated += 1;
                     assert!(*k < max);
                     true
                 });
 
                 barrier_clone.wait().await;
-                scanned = 0;
+                iterated = 0;
                 max = removed_clone.load(Acquire);
                 hashmap_clone
                     .retain_async(|k, _| {
-                        scanned += 1;
+                        iterated += 1;
                         assert!(*k < max);
                         true
                     })
@@ -1745,11 +1745,11 @@ mod hashindex {
             let task = tokio::task::spawn(async move {
                 // test insert
                 barrier_clone.wait().await;
-                let mut scanned = 0;
+                let mut iterated = 0;
                 let mut checker = BTreeSet::new();
                 let mut max = inserted_clone.load(Acquire);
                 hashindex_clone.retain_sync(|k, _| {
-                    scanned += 1;
+                    iterated += 1;
                     checker.insert(*k);
                     true
                 });
@@ -1758,12 +1758,12 @@ mod hashindex {
                 }
 
                 barrier_clone.wait().await;
-                scanned = 0;
+                iterated = 0;
                 checker = BTreeSet::new();
                 max = inserted_clone.load(Acquire);
                 hashindex_clone
                     .retain_async(|k, _| {
-                        scanned += 1;
+                        iterated += 1;
                         checker.insert(*k);
                         true
                     })
@@ -1774,20 +1774,20 @@ mod hashindex {
 
                 // test remove
                 barrier_clone.wait().await;
-                scanned = 0;
+                iterated = 0;
                 max = removed_clone.load(Acquire);
                 hashindex_clone.retain_sync(|k, _| {
-                    scanned += 1;
+                    iterated += 1;
                     assert!(*k < max);
                     true
                 });
 
                 barrier_clone.wait().await;
-                scanned = 0;
+                iterated = 0;
                 max = removed_clone.load(Acquire);
                 hashindex_clone
                     .retain_async(|k, _| {
-                        scanned += 1;
+                        iterated += 1;
                         assert!(*k < max);
                         true
                     })
@@ -2722,6 +2722,55 @@ mod treeindex {
     }
 
     #[test]
+    fn double_ended_iter() {
+        let workload_size = 16384;
+        let tree: TreeIndex<usize, ()> = TreeIndex::default();
+        for k in 0..workload_size {
+            assert!(tree.insert_sync(k, ()).is_ok());
+        }
+
+        let guard = Guard::new();
+        let mut de_iter = tree.iter(&guard);
+        for k in 0..workload_size / 4 {
+            assert_eq!(de_iter.next_back(), Some((&(workload_size - k - 1), &())));
+        }
+        for k in 0..workload_size / 4 {
+            assert_eq!(de_iter.next(), Some((&k, &())));
+        }
+        for k in 0..workload_size / 4 {
+            assert_eq!(
+                de_iter.next_back(),
+                Some((&(workload_size - k - 1 - workload_size / 4), &()))
+            );
+        }
+        for k in 0..workload_size / 4 {
+            assert_eq!(de_iter.next(), Some((&(k + workload_size / 4), &())));
+        }
+        assert!(de_iter.next().is_none());
+        assert!(de_iter.next_back().is_none());
+
+        // Only one end of the iterator was exhausted.
+        for rev in [true, false] {
+            let mut de_iter = tree.iter(&guard);
+            if rev {
+                let mut prev = usize::MAX;
+                while let Some((key, ())) = de_iter.next_back() {
+                    assert!(prev > *key);
+                    prev = *key;
+                }
+                assert!(de_iter.next().is_none());
+            } else {
+                let mut prev = 0;
+                for (key, ()) in de_iter.by_ref() {
+                    assert!(prev == 0 || prev < *key);
+                    prev = *key;
+                }
+                assert!(de_iter.next_back().is_none());
+            }
+        }
+    }
+
+    #[test]
     fn range() {
         let tree: TreeIndex<String, usize> = TreeIndex::default();
         assert!(tree.insert_sync("Ape".to_owned(), 0).is_ok());
@@ -2946,9 +2995,9 @@ mod treeindex {
         }
 
         let guard = Guard::new();
-        let scanner = tree.iter(&guard);
+        let iter = tree.iter(&guard);
         let mut prev = 0;
-        for entry in scanner {
+        for entry in iter {
             assert!(prev == 0 || prev < *entry.0);
             assert_eq!(*entry.0, *entry.1);
             prev = *entry.0;
@@ -2957,93 +3006,101 @@ mod treeindex {
 
     #[test]
     fn insert_peek_remove_range_sync() {
-        let range = if cfg!(miri) { 8 } else { 4096 };
-        let num_threads = if cfg!(miri) { 2 } else { 8 };
+        let (num_threads, range) = if cfg!(miri) { (2, 8) } else { (8, 4096) };
         let tree: Arc<TreeIndex<usize, usize>> = Arc::new(TreeIndex::new());
         for t in 0..num_threads {
-            // insert markers
+            // Fixed points.
             assert!(tree.insert_sync(t * range, t * range).is_ok());
         }
         let stopped: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let barrier = Arc::new(Barrier::new(num_threads + 1));
         let mut threads = Vec::with_capacity(num_threads);
         for thread_id in 0..num_threads {
-            let tree = tree.clone();
-            let stopped = stopped.clone();
-            let barrier = barrier.clone();
+            let (tree, stopped, barrier) = (tree.clone(), stopped.clone(), barrier.clone());
             threads.push(thread::spawn(move || {
-                let first_key = thread_id * range;
+                let first = thread_id * range;
                 barrier.wait();
                 while !stopped.load(Relaxed) {
-                    for key in (first_key + 1)..(first_key + range) {
-                        assert!(tree.insert_sync(key, key).is_ok());
+                    for k in (first + 1)..(first + range) {
+                        assert!(tree.insert_sync(k, k).is_ok());
                     }
-                    for key in (first_key + 1)..(first_key + range) {
-                        assert!(
-                            tree.peek_with(&key, |key, val| assert_eq!(key, val))
-                                .is_some()
-                        );
+                    for k in (first + 1)..(first + range) {
+                        assert!(tree.peek_with(&k, |k, v| assert_eq!(k, v)).is_some());
                     }
                     {
                         let guard = Guard::new();
-                        let mut range_scanner = tree.range(first_key.., &guard);
-                        let mut entry = range_scanner.next().unwrap();
-                        assert_eq!(entry, (&first_key, &first_key));
-                        entry = range_scanner.next().unwrap();
-                        assert_eq!(entry, (&(first_key + 1), &(first_key + 1)));
-                        entry = range_scanner.next().unwrap();
-                        assert_eq!(entry, (&(first_key + 2), &(first_key + 2)));
-                        entry = range_scanner.next().unwrap();
-                        assert_eq!(entry, (&(first_key + 3), &(first_key + 3)));
+                        let mut range_iter = tree.range(first.., &guard);
+                        let mut entry = range_iter.next().unwrap();
+                        assert_eq!(entry, (&first, &first));
+                        entry = range_iter.next().unwrap();
+                        assert_eq!(entry, (&(first + 1), &(first + 1)));
+                        entry = range_iter.next().unwrap();
+                        assert_eq!(entry, (&(first + 2), &(first + 2)));
+                        entry = range_iter.next().unwrap();
+                        assert_eq!(entry, (&(first + 3), &(first + 3)));
                     }
 
-                    let key_at_halfway = first_key + range / 2;
-                    for key in (first_key + 1)..(first_key + range) {
+                    let key_at_halfway = first + range / 2;
+                    for key in (first + 1)..(first + range) {
                         if key == key_at_halfway {
                             let guard = Guard::new();
-                            let mut range_scanner = tree.range((first_key + 1).., &guard);
-                            let entry = range_scanner.next().unwrap();
-                            assert_eq!(entry, (&key_at_halfway, &key_at_halfway));
-                            let entry = range_scanner.next().unwrap();
+                            let mut range_iter = tree.range((first + 1).., &guard);
+                            let entry = range_iter.next().unwrap();
+                            assert_eq!(entry, (&key_at_halfway, &key_at_halfway)); // TODO!  left: (26153, 26153) right: (26624, 26624)
+                            let entry = range_iter.next().unwrap();
                             assert_eq!(entry, (&(key_at_halfway + 1), &(key_at_halfway + 1)));
                         }
                         assert!(tree.remove_sync(&key));
                         assert!(!tree.remove_sync(&key));
-                        assert!(tree.peek_with(&(first_key + 1), |_, _| ()).is_none());
+                        assert!(tree.peek_with(&(first + 1), |_, _| ()).is_none());
                         assert!(tree.peek_with(&key, |_, _| ()).is_none());
                     }
-                    for key in (first_key + 1)..(first_key + range) {
-                        assert!(
-                            tree.peek_with(&key, |key, val| assert_eq!(key, val))
-                                .is_none()
-                        );
+                    for k in (first + 1)..(first + range) {
+                        assert!(tree.peek_with(&k, |k, v| assert_eq!(k, v)).is_none());
                     }
                 }
             }));
         }
         barrier.wait();
 
-        let iteration = if cfg!(miri) { 16 } else { 512 };
-        for _ in 0..iteration {
-            let mut found_0 = false;
-            let mut found_markers = 0;
-            let mut prev_marker = 0;
-            let mut prev = 0;
+        let repeat = if cfg!(miri) { 16 } else { 512 };
+        for _ in 0..repeat {
+            let (mut found_0, mut found_markers) = (false, 0);
+            let (mut prev_marker, mut prev_marker_rev) = (0, 0);
+            let (mut prev, mut prev_rev) = (0, usize::MAX);
             let guard = Guard::new();
-            for iter in tree.iter(&guard) {
-                let current = *iter.0;
-                if current % range == 0 {
+            let (mut iter, mut iter_ended, mut iter_rev_ended, mut rev) =
+                (tree.iter(&guard), false, false, false);
+            while !iter_ended || !iter_rev_ended {
+                rev = iter_ended || (!iter_rev_ended && rev);
+                let current = if rev { iter.next_back() } else { iter.next() };
+                let Some((key, _)) = current else {
+                    if rev {
+                        iter_rev_ended = true;
+                    } else {
+                        iter_ended = true;
+                    }
+                    continue;
+                };
+                if key % range == 0 {
                     found_markers += 1;
-                    if current == 0 {
+                    if *key == 0 {
                         found_0 = true;
+                    } else if rev {
+                        assert!(prev_marker_rev == 0 || prev_marker_rev - range == *key);
+                        prev_marker_rev = *key;
+                    } else {
+                        assert_eq!(prev_marker + range, *key);
+                        prev_marker = *key;
                     }
-                    if current > 0 {
-                        assert_eq!(prev_marker + range, current);
-                    }
-                    prev_marker = current;
                 }
-                assert!(prev == 0 || prev < current);
-                prev = current;
+                assert!((rev && prev_rev > *key) || (!rev && (prev == 0 || prev < *key)));
+                if rev {
+                    prev_rev = *key;
+                } else {
+                    prev = *key;
+                }
+                rev = !rev;
             }
             assert!(found_0);
             assert_eq!(found_markers, num_threads);

@@ -1,4 +1,4 @@
-//! [`HashSet`] is a concurrent hash set.
+//! [`HashSet`] is an asynchronous/concurrent hash set.
 
 #![deny(unsafe_code)]
 
@@ -12,9 +12,9 @@ use super::hash_map;
 use super::hash_table::HashTable;
 use super::{Equivalent, HashMap};
 
-/// Scalable concurrent hash set.
+/// Scalable asynchronous/concurrent hash set.
 ///
-/// [`HashSet`] is a concurrent hash set based on [`HashMap`].
+/// [`HashSet`] is an asynchronous/concurrent hash set based on [`HashMap`].
 pub struct HashSet<K, H = RandomState>
 where
     H: BuildHasher,

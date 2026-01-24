@@ -29,8 +29,8 @@
 //! | 创建 | 0 ns | ~100 ns (首次) / ~20 ns (池命中) |
 //! | Clone | ~1 ns | ~5 ns (atomic inc) |
 //! | Drop | 0 ns | ~5 ns (atomic dec) + 可能的清理 |
-//! | as_str() | 0 ns | 0 ns (直接访问) |
-//! | len() | 0 ns | 0 ns (直接读字段) |
+//! | `as_str()` | 0 ns | 0 ns (直接访问) |
+//! | `len()` | 0 ns | 0 ns (直接读字段) |
 //!
 //! # 使用场景
 //!
@@ -220,6 +220,7 @@ impl Str {
     /// assert_eq!(s.as_static(), Some("constant"));
     /// assert_eq!(s.ref_count(), None);
     /// ```
+    #[must_use]
     #[inline]
     pub const fn from_static(s: &'static str) -> Self { Self::Static(s) }
 
@@ -229,8 +230,8 @@ impl Str {
     ///
     /// # Performance
     ///
-    /// - **首次创建**：堆分配 + HashMap 插入 ≈ 100-200ns
-    /// - **池命中**：HashMap 查找 + 引用计数递增 ≈ 10-20ns
+    /// - **首次创建**：堆分配 + `HashMap` 插入 ≈ 100-200ns
+    /// - **池命中**：`HashMap` 查找 + 引用计数递增 ≈ 10-20ns
     ///
     /// # Thread Safety
     ///
@@ -304,6 +305,7 @@ impl Str {
     /// }
     /// # fn register_constant(_: &'static str) {}
     /// ```
+    #[must_use]
     #[inline]
     pub const fn is_static(&self) -> bool { matches!(self, Self::Static(_)) }
 
@@ -330,6 +332,7 @@ impl Str {
     /// assert_eq!(s2.ref_count(), Some(2));
     /// assert_eq!(s3.ref_count(), Some(2));
     /// ```
+    #[must_use]
     #[inline]
     pub fn ref_count(&self) -> Option<usize> {
         match self {
@@ -374,6 +377,7 @@ impl Str {
     ///     eprintln!("warning: not a static string");
     /// }
     /// ```
+    #[must_use]
     #[inline]
     pub const fn as_static(&self) -> Option<&'static str> {
         match self {
@@ -397,6 +401,7 @@ impl Str {
     /// assert!(s1.as_arc_str().is_none());
     /// assert!(s2.as_arc_str().is_some());
     /// ```
+    #[must_use]
     #[inline]
     pub const fn as_arc_str(&self) -> Option<&ArcStr> {
         match self {
@@ -421,6 +426,7 @@ impl Str {
     /// assert!(s1.into_arc_str().is_some());
     /// assert!(s2.into_arc_str().is_none());
     /// ```
+    #[must_use]
     #[inline]
     pub fn into_arc_str(self) -> Option<ArcStr> {
         match self {
@@ -454,7 +460,8 @@ impl Str {
     /// let s = Str::new("hello");
     /// assert_eq!(s.as_str(), "hello");
     /// ```
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn as_str(&self) -> &str {
         match self {
             Self::Static(s) => s,
@@ -474,7 +481,8 @@ impl Str {
     /// let s = Str::new("hello");
     /// assert_eq!(s.as_bytes(), b"hello");
     /// ```
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Static(s) => s.as_bytes(),
@@ -499,7 +507,8 @@ impl Str {
     /// let s = Str::new("hello");
     /// assert_eq!(s.len(), 5);
     /// ```
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn len(&self) -> usize {
         match self {
             Self::Static(s) => s.len(),
@@ -522,7 +531,8 @@ impl Str {
     /// assert!(s1.is_empty());
     /// assert!(!s2.is_empty());
     /// ```
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn is_empty(&self) -> bool {
         match self {
             Self::Static(s) => s.is_empty(),
@@ -541,7 +551,8 @@ impl Str {
     /// let ptr = s.as_ptr();
     /// assert!(!ptr.is_null());
     /// ```
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub const fn as_ptr(&self) -> *const u8 {
         match self {
             Self::Static(s) => s.as_ptr(),
@@ -686,7 +697,7 @@ impl From<Str> for alloc::boxed::Box<str> {
     fn from(s: Str) -> Self { s.as_str().into() }
 }
 
-impl<'a> From<Str> for Cow<'a, str> {
+impl From<Str> for Cow<'_, str> {
     /// 转换为 `Cow`
     ///
     /// - **Static 变体**：转换为 `Cow::Borrowed`（零成本）
@@ -1057,8 +1068,8 @@ impl const Default for Str {
 
 #[cfg(feature = "serde")]
 mod serde_impls {
-    use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use super::Str;
+    use serde_core::{Deserialize, Deserializer, Serialize, Serializer};
 
     impl Serialize for Str {
         /// 序列化为普通字符串，丢失变体信息

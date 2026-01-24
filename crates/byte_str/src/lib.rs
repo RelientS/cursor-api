@@ -20,7 +20,7 @@ extern crate alloc;
 extern crate bytes;
 
 #[cfg(feature = "serde")]
-extern crate serde;
+extern crate serde_core;
 
 #[macro_use]
 extern crate cfg_if;
@@ -207,18 +207,13 @@ impl core::hash::Hash for ByteStr {
     #[inline]
     fn hash<H>(&self, state: &mut H)
     where H: core::hash::Hasher {
-        self.bytes.hash(state)
+        ops::Deref::deref(self).hash(state)
     }
 }
 
 impl const Borrow<str> for ByteStr {
     #[inline]
-    fn borrow(&self) -> &str { &**self }
-}
-
-impl const Borrow<[u8]> for ByteStr {
-    #[inline]
-    fn borrow(&self) -> &[u8] { self.as_ref() }
+    fn borrow(&self) -> &str { self }
 }
 
 impl PartialEq<str> for ByteStr {

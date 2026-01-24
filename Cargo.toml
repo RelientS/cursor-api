@@ -9,11 +9,12 @@ members = [
     "crates/byte_str",
     "crates/atomic_enum",
     "crates/proto-value",
+    "__build",
 ]
 default-members = ["."]
 
 [workspace.package]
-version = "0.4.0-pre.17"
+version = "0.4.0-pre.19"
 edition = "2024"
 authors = ["wisdgod <nav@wisdgod.com>"]
 description = "A format compatibility layer for the Cursor API"
@@ -42,7 +43,6 @@ codegen-units = 256
 [profile.fast]
 inherits = "dev"
 opt-level = 1
-trim-paths = "all"
 
 # ===== 性能测试配置（接近 release 但编译更快）=====
 [profile.bench]
@@ -52,21 +52,16 @@ codegen-units = 16
 
 # ===== 发布配置（性能最大化）=====
 [profile.release]
-opt-level = 3
-lto = "fat"
+lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-debug = false
-overflow-checks = false
-incremental = false
-trim-paths = "all"
 
 [patch.crates-io]
 h2 = { path = "patch/h2-0.4.10" }
 reqwest = { path = "patch/reqwest-0.12.18" }
 rustls = { path = "patch/rustls-0.23.35" }
-chrono = { path = "patch/chrono-0.4.42" }
+chrono = { path = "patch/chrono-0.4.43" }
 dotenvy = { path = "patch/dotenvy-0.15.7" }
 prost = { path = "patch/prost-0.14.1" }
 # prost-derive = { path = "patch/prost-derive" }
@@ -95,7 +90,9 @@ path = "src/main.rs"
 # path = "tools/rkyv_adapter/src/main.rs"
 
 [build-dependencies]
-chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+__build = { package = "cursor-api-build", path = "__build" }
+
+# chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 # prost-build = { version = "0.14", optional = true }
 sha2 = { version = "0", default-features = false }
 serde_json = "1"
@@ -134,7 +131,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
     "rkyv-64",
 ] }
-chrono-tz = { version = "0.10", features = ["serde"] }
+chrono-tz = { version = "0.11.0", features = ["serde"], git = "https://github.com/chronotope/chrono-tz.git" }
 # crossbeam = { version = "0.8.4", features = ["nightly"] }
 # dashmap = { version = "7.0.0-rc2", features = ["inline-more"] }
 dotenvy = "0.15"

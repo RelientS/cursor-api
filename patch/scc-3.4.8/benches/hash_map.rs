@@ -4,28 +4,6 @@ use criterion::async_executor::FuturesExecutor;
 use criterion::{Criterion, criterion_group, criterion_main};
 use scc::HashMap;
 
-fn insert_single_async(c: &mut Criterion) {
-    c.bench_function("HashMap: insert_single_async", |b| {
-        let hashmap: HashMap<u64, u64> = HashMap::default();
-        assert!(hashmap.insert_sync(0, 0).is_ok());
-        async fn test(hashmap: &HashMap<u64, u64>) {
-            assert!(hashmap.insert_async(0, 0).await.is_err());
-        }
-        b.to_async(FuturesExecutor).iter(|| test(&hashmap));
-    });
-}
-
-fn insert_single_sync(c: &mut Criterion) {
-    c.bench_function("HashMap: insert_single_sync", |b| {
-        let hashmap: HashMap<u64, u64> = HashMap::default();
-        assert!(hashmap.insert_sync(0, 0).is_ok());
-        fn test(hashmap: &HashMap<u64, u64>) {
-            assert!(hashmap.insert_sync(0, 0).is_err());
-        }
-        b.iter(|| test(&hashmap));
-    });
-}
-
 fn insert_remove_single_async(c: &mut Criterion) {
     c.bench_function("HashMap: insert_remove_single_async", |b| {
         let hashmap: HashMap<u64, u64> = HashMap::default();
@@ -160,8 +138,6 @@ fn insert_tail_latency(c: &mut Criterion) {
 
 criterion_group!(
     hash_map,
-    insert_single_async,
-    insert_single_sync,
     insert_remove_single_async,
     insert_remove_single_sync,
     insert_cold_async,

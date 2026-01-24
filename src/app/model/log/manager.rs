@@ -312,7 +312,7 @@ fn handle_command(mgr: &mut LogManager, cmd: LogCommand) -> bool {
                     };
                 }
             }
-            mgr.logs.push_back(log);
+            mgr.logs.push_back(*log);
             match mgr.tokens.entry(key) {
                 Entry::Occupied(e) => {
                     let a = e.into_mut();
@@ -383,7 +383,7 @@ trait Expect: Sized {
 }
 impl<V> Expect for Result<(), tokio::sync::mpsc::error::SendError<V>> {
     type T = ();
-    fn expect(self) -> () {
+    fn expect(self) {
         core::result::Result::expect(self, "Log actor is dead - this should never happen")
     }
 }
@@ -403,7 +403,7 @@ pub async fn get_logs(params: super::GetLogsParams) -> (u64, Vec<RequestLog>) {
 }
 
 pub async fn add_log(log: RequestLog, token: ExtToken) {
-    expect(LOG_COMMAND_SENDER.send(LogCommand::AddLog { log, token }).await)
+    expect(LOG_COMMAND_SENDER.send(LogCommand::AddLog { log: Box::new(log), token }).await)
 }
 
 pub async fn get_next_log_id() -> u64 {

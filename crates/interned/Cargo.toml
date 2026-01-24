@@ -36,12 +36,12 @@ ahash = { version = "0.8", default-features = false, features = [
 
 manually_init.workspace = true
 
-serde = { version = "1.0", default-features = false, optional = true }
+serde_core = { version = "1", default-features = false, optional = true }
 
 [features]
 default = ["serde"]
 nightly = []
-serde = ["dep:serde"]
+serde = ["dep:serde_core"]
 
 #[profile.release]
 #opt-level = 3

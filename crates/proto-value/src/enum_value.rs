@@ -41,7 +41,7 @@ impl<T: [const] Into<i32>> const From<T> for Enum<T> {
 mod serde_impls {
     use super::Enum;
     use core::{fmt, marker::PhantomData};
-    use serde::{
+    use serde_core::{
         Deserialize, Deserializer, Serialize, Serializer,
         de::{self, Unexpected, Visitor, value::StrDeserializer},
     };

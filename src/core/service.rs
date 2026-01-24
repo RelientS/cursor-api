@@ -97,7 +97,7 @@ pub async fn handle_models(
     };
 
     // 获取token信息
-    let (ext_token, use_pri) = (async || {
+    let (ext_token, use_pri) = async {
         // 管理员 Token
         if let Some(part) = auth_token.strip_prefix(&**AUTH_TOKEN) {
             let token_manager = state.token_manager.read().await;
@@ -135,15 +135,14 @@ pub async fn handle_models(
         } else
         // 动态密钥
         if AppConfig::is_dynamic_key_enabled() {
-            if let Some(parsed_config) = parse_dynamic_token(auth_token) {
-                if let Some(ext_token) = parsed_config.into_tuple().and_then(tokeninfo_to_token) {
+            if let Some(parsed_config) = parse_dynamic_token(auth_token)
+                && let Some(ext_token) = parsed_config.into_tuple().and_then(tokeninfo_to_token) {
                     return Ok((ext_token, false));
                 }
-            }
         }
 
         Err(AuthError::Unauthorized)
-    })()
+    }
     .await
     .map_err(AuthError::into_generic_tuple)?;
 
@@ -799,7 +798,7 @@ pub async fn handle_chat_completions(
                 let response = openai::ChatCompletionChunk {
                     id: &response_id,
                     object: openai::ObjectChatCompletionChunk,
-                    created: created,
+                    created,
                     model: model.id,
                     choices: Some(openai::chat_completion_chunk::Choice {
                         index: (),
