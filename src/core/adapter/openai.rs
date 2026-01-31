@@ -1,6 +1,7 @@
 use super::{
     AdapterError, BaseUuid, Messages, NEWLINE, extract_external_links, extract_web_references_info,
     traits::*,
+    utils::{ToolId, ToolName, ToolResultBuilder},
 };
 use crate::{
     app::model::DEFAULT_INSTRUCTIONS,
@@ -12,7 +13,7 @@ use crate::{
             mcp_params, stream_unified_chat_request,
         },
         model::{
-            ExtModel, IndexMap, ToolId,
+            ExtModel, IndexMap,
             openai::{
                 ChatCompletionContent, ChatCompletionContentPart, ChatCompletionContentText,
                 ChatCompletionMessageParam, ChatCompletionMessageToolCall, ChatCompletionTool,
@@ -75,10 +76,7 @@ impl ToolResult for ChatCompletionContentText {
             ChatCompletionContentText::Array(cs) => cs.len(),
         })
     }
-    async fn add_to(
-        self,
-        builder: &mut super::utils::ToolResultBuilder,
-    ) -> Result<(), AdapterError> {
+    async fn add_to(self, builder: &mut ToolResultBuilder) -> Result<(), AdapterError> {
         match self {
             ChatCompletionContentText::String(text) => builder.add(text),
             ChatCompletionContentText::Array(cs) => {
@@ -246,8 +244,7 @@ impl Adapter for Openai {
                         else {
                             __unreachable!()
                         };
-                        let tool_name: ByteStr = format!("mcp_custom_{name}").into();
-                        let name = unsafe { tool_name.slice_unchecked(11..) };
+                        let ToolName { tool_name, name, server_name } = ToolName::parse(name);
                         let result = content.result().await?;
                         let tool_id = ToolId::parse(tool_call_id);
                         let result = Some(ClientSideToolV2Result {
@@ -271,7 +268,7 @@ impl Adapter for Openai {
                                 tools: vec![mcp_params::Tool {
                                     name,
                                     parameters: raw_args.clone(),
-                                    server_name: ByteStr::from_static("custom"),
+                                    server_name,
                                     ..Default::default()
                                 }],
                             })),

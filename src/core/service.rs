@@ -808,7 +808,7 @@ pub async fn handle_chat_completions(
                             tool_calls: None,
                         }),
                         logprobs: (),
-                        finish_reason: Some(if decoder_guard.tool_processed() != 0 {
+                        finish_reason: Some(if decoder_guard.tool_processed() == 0 {
                             openai::FinishReason::Stop
                         } else {
                             openai::FinishReason::ToolCalls
@@ -958,7 +958,7 @@ pub async fn handle_chat_completions(
             model: Some(model.id),
             choices: Some(openai::chat_completion::Choice {
                 index: 0,
-                finish_reason: if decoder.tool_processed() != 0 {
+                finish_reason: if decoder.tool_processed() == 0 {
                     openai::FinishReason::Stop
                 } else {
                     openai::FinishReason::ToolCalls
@@ -1670,7 +1670,7 @@ pub async fn handle_messages(
 
                 extend_from_slice(&mut response_data, &anthropic::RawMessageStreamEvent::MessageDelta {
                     delta: anthropic::MessageDelta {
-                        stop_reason: if decoder_guard.tool_processed() != 0 {
+                        stop_reason: if decoder_guard.tool_processed() == 0 {
                             anthropic::StopReason::EndTurn
                         } else {
                             anthropic::StopReason::ToolUse
@@ -1829,7 +1829,7 @@ pub async fn handle_messages(
         };
 
         let response_data = anthropic::Message {
-            stop_reason: Some(if decoder.tool_processed() != 0 {
+            stop_reason: Some(if decoder.tool_processed() == 0 {
                 anthropic::StopReason::EndTurn
             } else {
                 anthropic::StopReason::ToolUse

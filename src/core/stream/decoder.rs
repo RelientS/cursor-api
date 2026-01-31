@@ -5,9 +5,9 @@ mod utils;
 
 // use core::sync::atomic::{AtomicU32, Ordering};
 use crate::core::{
+    adapter::ToolId,
     aiserver::v1::{StreamUnifiedChatResponseWithTools, WebReference},
     error::{CursorError, StreamError},
-    model::ToolId,
 };
 use alloc::borrow::Cow;
 use byte_str::ByteStr;
@@ -449,7 +449,13 @@ impl StreamDecoder {
                                 let Params::McpParams(ps) = ps;
                                 ps.tools.into_iter().next()
                             })
-                            .map(|tool| tool.name)
+                            .map(|tool| {
+                                if tool.server_name == *"custom" {
+                                    tool.name
+                                } else {
+                                    format!("mcp__{}__{}", tool.server_name, tool.name).into()
+                                }
+                            })
                             .unwrap_or_default();
 
                         return result.map(|input| {

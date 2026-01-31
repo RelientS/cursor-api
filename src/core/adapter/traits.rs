@@ -7,11 +7,11 @@ use super::{
             client_side_tool_v2_result, image_proto, mcp_params, stream_unified_chat_request,
             stream_unified_chat_request_with_tools,
         },
-        model::{ExtModel, IndexMap, ToolId},
+        model::{ExtModel, IndexMap},
     },
     AGENT_MODE_NAME, ASK_MODE_NAME, AdapterError, BaseUuid, Messages, WEB_SEARCH_MODE,
     is_animated_gif, process_http_image,
-    utils::ToolResultBuilder,
+    utils::{ToolId, ToolResultBuilder},
 };
 use crate::app::model::{AppConfig, VisionAbility, create_explicit_context};
 use byte_str::ByteStr;

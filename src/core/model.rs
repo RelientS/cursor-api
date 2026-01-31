@@ -1,14 +1,12 @@
 pub mod anthropic;
 pub mod openai;
 mod resolver;
-mod tool_id_parser;
 
 // use crate::app::constant::TOOLU01_PREFIX;
 use super::constant::Models;
 use crate::common::model::raw_json::RawJson;
 pub(crate) use resolver::{ExtModel, init_resolver};
 use serde::{Serialize, ser::SerializeStruct as _};
-pub(crate) use tool_id_parser::ToolId;
 
 pub(super) type IndexMap<K, V> = indexmap::IndexMap<K, V, ahash::RandomState>;
 

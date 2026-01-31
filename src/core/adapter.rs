@@ -11,6 +11,7 @@ mod error;
 mod traits;
 mod utils;
 pub use error::Error as AdapterError;
+pub use utils::ToolId;
 
 crate::define_typed_constants! {
     &'static str => {
@@ -87,7 +88,11 @@ fn parse_web_references(text: &str) -> Vec<WebReference> {
 
 // 解析消息中的外部链接
 #[inline]
-fn extract_external_links(text: &str, external_links: &mut Vec<ComposerExternalLink>, base_uuid: &mut BaseUuid) {
+fn extract_external_links(
+    text: &str,
+    external_links: &mut Vec<ComposerExternalLink>,
+    base_uuid: &mut BaseUuid,
+) {
     let mut chars = text.chars().peekable();
 
     while let Some(c) = chars.next() {

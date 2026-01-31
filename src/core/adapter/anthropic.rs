@@ -2,7 +2,7 @@ use super::{
     AdapterError, BaseUuid, Messages, NEWLINE, extract_external_links, extract_web_references_info,
     process_http_to_base64_image,
     traits::*,
-    utils::{RawContent, ToolResultBuilder},
+    utils::{RawContent, ToolId, ToolName, ToolResultBuilder},
 };
 use crate::{
     app::{constant::EMPTY_STRING, model::DEFAULT_INSTRUCTIONS},
@@ -14,7 +14,7 @@ use crate::{
             mcp_params, stream_unified_chat_request,
         },
         model::{
-            ExtModel, IndexMap, Role, ToolId,
+            ExtModel, IndexMap, Role,
             anthropic::{
                 ContentBlockParam, DocumentSource, ImageSource, ImageSourceBase64, MediaType,
                 MessageContent, MessageParam, SystemContent, Tool, ToolResultContent,
@@ -48,9 +48,9 @@ impl ToolResult for (Option<ToolResultContent>, bool) {
     fn is_error(&self) -> bool { self.1 }
     fn size_hint(&self) -> Option<usize> {
         self.0.as_ref().map(|c| match c {
-                ToolResultContent::String(..) => 1,
-                ToolResultContent::Array(cs) => cs.len(),
-            })
+            ToolResultContent::String(..) => 1,
+            ToolResultContent::Array(cs) => cs.len(),
+        })
     }
     async fn add_to(self, builder: &mut ToolResultBuilder) -> Result<(), AdapterError> {
         if let Some(c) = self.0 {
@@ -236,8 +236,7 @@ impl Adapter for Anthropic {
                         else {
                             __unreachable!()
                         };
-                        let tool_name: ByteStr = format!("mcp_custom_{name}").into();
-                        let name = unsafe { tool_name.slice_unchecked(11..) };
+                        let ToolName { tool_name, name, server_name } = ToolName::parse(name);
                         let result = (content, is_error).result().await?;
                         let tool_id = ToolId::parse(tool_use_id);
                         let result = Some(ClientSideToolV2Result {
@@ -261,7 +260,7 @@ impl Adapter for Anthropic {
                                 tools: vec![mcp_params::Tool {
                                     name,
                                     parameters: raw_args.clone(),
-                                    server_name: ByteStr::from_static("custom"),
+                                    server_name,
                                     ..Default::default()
                                 }],
                             })),
