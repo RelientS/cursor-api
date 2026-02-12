@@ -1,42 +1,86 @@
-use super::model::anthropic::ToolResultBlockParam;
-use byte_str::ByteStr;
-use bytes::Bytes;
-use core::{
-    pin::Pin,
-    task::{Context, Poll},
-};
-use futures::Stream;
-use manually_init::ManuallyInit;
-use parking_lot::RwLock;
-use reqwest::{DataStream, Decoder};
-use tokio::sync::mpsc;
+/// Session management for model_call_id reuse across HTTP requests
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use once_cell::sync::Lazy;
 
-type HashMap<K, V> = hashbrown::HashMap<K, V, ahash::RandomState>;
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type SessionTx = mpsc::Sender<ToolResultBlockParam>;
+/// Session ID type (UUID string)
+pub type SessionId = String;
 
-pub struct Session {
-    stream: DataStream<Decoder>,
-    sender: mpsc::Sender<Result<Bytes, BoxError>>,
+/// Model Call ID type
+pub type ModelCallId = String;
+
+/// Global session store
+static SESSION_STORE: Lazy<Arc<SessionStore>> = Lazy::new(|| Arc::new(SessionStore::new()));
+
+/// Session store that maps session_id to model_call_id
+pub struct SessionStore {
+    /// Map: session_id -> model_call_id
+    sessions: RwLock<HashMap<SessionId, ModelCallId>>,
 }
 
-impl Stream for Session {
-    type Item = Result<Bytes, reqwest::Error>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.stream).poll_next(cx)
+impl SessionStore {
+    pub fn new() -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get global instance
+    pub fn global() -> Arc<SessionStore> {
+        SESSION_STORE.clone()
+    }
+
+    /// Get or create model_call_id for a session
+    pub async fn get_or_create(&self, session_id: &str) -> Option<ModelCallId> {
+        let sessions = self.sessions.read().await;
+        sessions.get(session_id).cloned()
+    }
+
+    /// Save model_call_id for a session
+    pub async fn save(&self, session_id: String, model_call_id: String) {
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(session_id, model_call_id);
+    }
+
+    /// Remove a session
+    pub async fn remove(&self, session_id: &str) {
+        let mut sessions = self.sessions.write().await;
+        sessions.remove(session_id);
+    }
+
+    /// Clear all sessions (for testing)
+    #[allow(dead_code)]
+    pub async fn clear(&self) {
+        let mut sessions = self.sessions.write().await;
+        sessions.clear();
+    }
+
+    /// Get session count (for debugging)
+    #[allow(dead_code)]
+    pub async fn len(&self) -> usize {
+        let sessions = self.sessions.read().await;
+        sessions.len()
     }
 }
 
-pub struct Registry {
-    inner: RwLock<HashMap<ByteStr, SessionTx>>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Registry {
-    pub fn init() {
-        REGISTRY.init(Registry {
-            inner: RwLock::new(HashMap::with_capacity_and_hasher(16, ahash::RandomState::new())),
-        })
+    #[tokio::test]
+    async fn test_session_store() {
+        let store = SessionStore::new();
+        
+        // Initial state
+        assert_eq!(store.get_or_create("session1").await, None);
+        
+        // Save
+        store.save("session1".to_string(), "model_call_id_1".to_string()).await;
+        assert_eq!(store.get_or_create("session1").await, Some("model_call_id_1".to_string()));
+        
+        // Remove
+        store.remove("session1").await;
+        assert_eq!(store.get_or_create("session1").await, None);
     }
 }
-
-static REGISTRY: ManuallyInit<Registry> = ManuallyInit::new();

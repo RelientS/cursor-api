@@ -121,6 +121,8 @@ impl StreamMessage {
 struct Context {
     raw_args_len: usize,
     processed: u32,
+    // 保存第一次收到的 model_call_id，用于后续复用
+    saved_model_call_id: Option<ByteStr>,
     // 调试使用
     // counter: u32,
 }
@@ -144,6 +146,11 @@ pub struct StreamDecoder {
 
 impl StreamDecoder {
     pub fn new() -> Self {
+        Self::with_model_call_id(None)
+    }
+
+    /// Create a new StreamDecoder with optional initial model_call_id (for session reuse)
+    pub fn with_model_call_id(model_call_id: Option<ByteStr>) -> Self {
         // static COUNTER: AtomicU32 = AtomicU32::new(0);
         Self {
             buffer: Buffer::with_capacity(64),
@@ -153,6 +160,7 @@ impl StreamDecoder {
             context: Context {
                 raw_args_len: 0,
                 processed: 0,
+                saved_model_call_id: model_call_id,
                 // counter: COUNTER.fetch_add(1, Ordering::SeqCst),
             },
             empty_stream_count: 0,
@@ -172,6 +180,12 @@ impl StreamDecoder {
             // crate::debug!("重置连续空流计数，之前的计数为: {}", self.empty_stream_count);
             self.empty_stream_count = 0;
         }
+    }
+
+    /// Get the saved model_call_id (for session persistence)
+    #[inline]
+    pub fn get_saved_model_call_id(&self) -> Option<String> {
+        self.context.saved_model_call_id.as_ref().map(|s| s.to_string())
     }
 
     #[inline]
@@ -347,15 +361,36 @@ impl StreamDecoder {
             // crate::debug!("StreamUnifiedChatResponseWithTools [hex: {}]: {:#?}", hex::encode(msg_data), response);
             // crate::debug!("{count}: {response:?}");
             if let Some(response) = wrapper.response {
-                // crate::debug!("received: {response:#?}");
+                eprintln!("🔍 [DEBUG] Received response variant: {:?}", std::mem::discriminant(&response));
                 use super::super::aiserver::v1::{
                     client_side_tool_v2_call::Params,
                     stream_unified_chat_response_with_tools::Response,
                 };
                 match response {
-                    Response::ClientSideToolV2Call(response) => {
+                    Response::ClientSideToolV2Call(mut response) => {
+                        eprintln!("🔍 [TOOL_CALL] tool_call_id={}, model_call_id={:?}, raw_args_len={}", 
+                            response.tool_call_id, response.model_call_id, response.raw_args.len());
+                        
                         let mut result = None;
                         let mut finish = false;
+
+                        // model_call_id 复用逻辑：保存第一个 model_call_id 并在后续调用中复用
+                        if let Some(ref model_call_id) = response.model_call_id {
+                            if ctx.saved_model_call_id.is_none() {
+                                // 第一次收到 model_call_id，保存它
+                                ctx.saved_model_call_id = Some(model_call_id.clone());
+                                crate::debug!("保存 model_call_id 用于复用: {}", model_call_id);
+                            } else {
+                                // 后续调用：使用保存的 model_call_id 替换当前的
+                                let saved_id = ctx.saved_model_call_id.as_ref().unwrap();
+                                crate::debug!(
+                                    "复用 model_call_id: {} -> {}",
+                                    model_call_id,
+                                    saved_id
+                                );
+                                response.model_call_id = Some(saved_id.clone());
+                            }
+                        }
 
                         // if !response.raw_args.is_empty() {
                         //     crate::debug!("detected: {:?}", response.raw_args);
